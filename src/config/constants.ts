@@ -19,3 +19,6 @@ export const RRF_K = 60; // Reciprocal Rank Fusion constant
 
 // Timeouts and retries
 export const OPENROUTER_TIMEOUT_MS = 30000;
+
+// Cache settings
+export const EMBEDDING_CACHE_MAX_SIZE = 1000;

@@ -11,7 +11,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { DEFAULT_OPENROUTER_EMBEDDING_DIMS, DEFAULT_OPENROUTER_MODEL, OPENROUTER_TIMEOUT_MS } from "../config/constants.js";
+import { DEFAULT_OPENROUTER_EMBEDDING_DIMS, DEFAULT_OPENROUTER_MODEL, EMBEDDING_CACHE_MAX_SIZE, OPENROUTER_TIMEOUT_MS } from "../config/constants.js";
 import { createDebugLogger } from "../utils/debug.js";
 
 // Configuration from environment
@@ -27,10 +27,49 @@ const MAX_RETRIES = 3;
 // Debug logging
 const debug = createDebugLogger("OPENROUTER");
 
+/**
+ * Simple LRU cache for embeddings.
+ * Evicts oldest entries when max size is reached.
+ */
+class LRUCache<K, V> {
+  private cache = new Map<K, V>();
+
+  constructor(private maxSize: number) {}
+
+  get(key: K): V | undefined {
+    const value = this.cache.get(key);
+    if (value !== undefined) {
+      // Move to end (most recently used)
+      this.cache.delete(key);
+      this.cache.set(key, value);
+    }
+    return value;
+  }
+
+  set(key: K, value: V): void {
+    this.cache.delete(key);
+    if (this.cache.size >= this.maxSize) {
+      const oldestKey = this.cache.keys().next().value;
+      if (oldestKey !== undefined) {
+        this.cache.delete(oldestKey);
+      }
+    }
+    this.cache.set(key, value);
+  }
+
+  get size(): number {
+    return this.cache.size;
+  }
+
+  clear(): void {
+    this.cache.clear();
+  }
+}
+
 // Embedding cache to reduce API calls
 // Key: SHA-256 hash of input text
 // Value: embedding vector
-const embeddingCache = new Map<string, number[]>();
+const embeddingCache = new LRUCache<string, number[]>(EMBEDDING_CACHE_MAX_SIZE);
 
 /**
  * Sleep for a specified duration
