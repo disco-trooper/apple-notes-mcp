@@ -4,6 +4,7 @@
   "description": "MCP server for Apple Notes with semantic search and CRUD operations",
   "type": "module",
   "main": "src/index.ts",
+  "module": "src/server.ts",
   "scripts": {
     "start": "bun run src/index.ts",
     "setup": "bun run src/setup.ts",
@@ -24,6 +25,7 @@
     "dotenv": "^16.4.0"
   },
   "devDependencies": {
+    "@smithery/cli": "^3.0.3",
     "@types/bun": "^1.1.0",
     "@types/turndown": "^5.0.0",
     "typescript": "^5.7.0",
