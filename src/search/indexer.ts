@@ -269,8 +269,11 @@ export async function incrementalIndex(): Promise<IndexResult> {
   // Process deletions
   for (const key of toDelete) {
     try {
-      const title = extractTitleFromKey(key);
-      await store.delete(title);
+      // Parse folder and title from key (e.g., "Work/Projects/My Note")
+      const lastSlash = key.lastIndexOf("/");
+      const folder = key.substring(0, lastSlash);
+      const title = key.substring(lastSlash + 1);
+      await store.deleteByFolderAndTitle(folder, title);
     } catch (error) {
       debug(`Error deleting ${key}:`, error);
       failedNotes.push(`DELETE: ${key}`);

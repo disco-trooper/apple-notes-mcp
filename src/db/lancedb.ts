@@ -25,6 +25,7 @@ export interface VectorStore {
   index(records: NoteRecord[]): Promise<void>;
   update(record: NoteRecord): Promise<void>;
   delete(title: string): Promise<void>;
+  deleteByFolderAndTitle(folder: string, title: string): Promise<void>;
   search(queryVector: number[], limit: number): Promise<SearchResult[]>;
   searchFTS(query: string, limit: number): Promise<SearchResult[]>;
   getByTitle(title: string): Promise<NoteRecord | null>;
@@ -145,6 +146,15 @@ export class LanceDBStore implements VectorStore {
     const escapedTitle = escapeForFilter(validTitle);
     await table.delete(`title = '${escapedTitle}'`);
     debug(`Deleted record: ${title}`);
+  }
+
+  async deleteByFolderAndTitle(folder: string, title: string): Promise<void> {
+    const table = await this.ensureTable();
+    const validTitle = validateTitle(title);
+    const escapedTitle = escapeForFilter(validTitle);
+    const escapedFolder = escapeForFilter(folder);
+    await table.delete(`folder = '${escapedFolder}' AND title = '${escapedTitle}'`);
+    debug(`Deleted record: ${folder}/${title}`);
   }
 
   async search(queryVector: number[], limit: number): Promise<SearchResult[]> {
