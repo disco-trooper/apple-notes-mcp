@@ -1,6 +1,7 @@
 import * as lancedb from "@lancedb/lancedb";
 import path from "node:path";
 import os from "node:os";
+import { validateTitle, escapeForFilter } from "./validation.js";
 
 // Schema for stored notes
 export interface NoteRecord {
@@ -69,9 +70,9 @@ export class LanceDBStore implements VectorStore {
       try {
         this.table = await db.openTable(this.tableName);
         debug(`Opened existing table: ${this.tableName}`);
-      } catch {
+      } catch (error) {
         // Table doesn't exist yet - will be created on first index
-        debug(`Table ${this.tableName} not found, will create on first index`);
+        debug(`Table ${this.tableName} not found, will create on first index. Error:`, error);
         throw new Error("Index not found. Run index-notes first.");
       }
     }
@@ -147,9 +148,8 @@ export class LanceDBStore implements VectorStore {
 
   async delete(title: string): Promise<void> {
     const table = await this.ensureTable();
-
-    // LanceDB uses SQL-like filter syntax
-    const escapedTitle = title.replace(/'/g, "''");
+    const validTitle = validateTitle(title);
+    const escapedTitle = escapeForFilter(validTitle);
     await table.delete(`title = '${escapedTitle}'`);
     debug(`Deleted record: ${title}`);
   }
@@ -189,37 +189,28 @@ export class LanceDBStore implements VectorStore {
         modified: row.modified as string,
         score: 1 / (1 + index),
       }));
-    } catch {
+    } catch (error) {
       // FTS might fail if no index or no matches
-      debug("FTS search failed, returning empty results");
+      debug("FTS search failed, returning empty results. Error:", error);
       return [];
     }
   }
 
   async getByTitle(title: string): Promise<NoteRecord | null> {
     const table = await this.ensureTable();
+    if (!table) return null;
 
-    const escapedTitle = title.replace(/'/g, "''");
+    const validTitle = validateTitle(title);
+    const escapedTitle = escapeForFilter(validTitle);
     const results = await table
       .query()
       .where(`title = '${escapedTitle}'`)
       .limit(1)
       .toArray();
 
-    if (results.length === 0) {
-      return null;
-    }
+    if (results.length === 0) return null;
 
-    const row = results[0];
-    return {
-      title: row.title as string,
-      content: row.content as string,
-      vector: row.vector as number[],
-      folder: row.folder as string,
-      created: row.created as string,
-      modified: row.modified as string,
-      indexed_at: row.indexed_at as string,
-    };
+    return results[0] as unknown as NoteRecord;
   }
 
   async getAll(): Promise<NoteRecord[]> {
