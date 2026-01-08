@@ -228,23 +228,24 @@ export async function getOpenRouterEmbedding(text: string): Promise<number[]> {
 
       return embedding;
     } catch (error) {
-      // Handle timeout errors
+      // Handle timeout errors - treat as retryable
       if (error instanceof Error && error.name === "AbortError") {
-        debug(`Request timed out after ${OPENROUTER_TIMEOUT_MS}ms`);
-        throw new OpenRouterError(
+        debug(`Request timed out after ${OPENROUTER_TIMEOUT_MS}ms (attempt ${attempt + 1}/${MAX_RETRIES})`);
+        lastError = new OpenRouterError(
           `Request timed out after ${OPENROUTER_TIMEOUT_MS}ms`,
           408
         );
-      }
+        // Don't throw - fall through to retry logic below
+      } else {
+        lastError = error instanceof Error ? error : new Error(String(error));
 
-      lastError = error instanceof Error ? error : new Error(String(error));
-
-      // Don't retry on non-retryable errors
-      if (error instanceof OpenRouterError && error.statusCode) {
-        const nonRetryable = [400, 401, 403, 404];
-        if (nonRetryable.includes(error.statusCode)) {
-          debug(`Non-retryable error (${error.statusCode}), failing immediately`);
-          throw error;
+        // Don't retry on non-retryable errors
+        if (error instanceof OpenRouterError && error.statusCode) {
+          const nonRetryable = [400, 401, 403, 404];
+          if (nonRetryable.includes(error.statusCode)) {
+            debug(`Non-retryable error (${error.statusCode}), failing immediately`);
+            throw error;
+          }
         }
       }
 
