@@ -125,7 +125,11 @@ function readClaudeConfig(): Record<string, unknown> | null {
   try {
     const content = fs.readFileSync(CLAUDE_CONFIG_PATH, "utf-8");
     return JSON.parse(content);
-  } catch {
+  } catch (error) {
+    // Config doesn't exist or is invalid JSON
+    if (process.env.DEBUG === "true") {
+      console.error("[SETUP] Could not read Claude config:", error);
+    }
     return null;
   }
 }
@@ -160,7 +164,10 @@ function addToClaudeConfig(): boolean {
   try {
     fs.writeFileSync(CLAUDE_CONFIG_PATH, JSON.stringify(config, null, 2) + "\n");
     return true;
-  } catch {
+  } catch (error) {
+    if (process.env.DEBUG === "true") {
+      console.error("[SETUP] Failed to write Claude config:", error);
+    }
     return false;
   }
 }

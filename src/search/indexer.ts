@@ -160,9 +160,9 @@ export async function incrementalIndex(): Promise<IndexResult> {
   let existingRecords: NoteRecord[];
   try {
     existingRecords = await store.getAll();
-  } catch {
+  } catch (error) {
     // No existing index, fall back to full index
-    debug("No existing index found, performing full index");
+    debug("No existing index found, performing full index. Error:", error);
     return fullIndex();
   }
 

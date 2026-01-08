@@ -328,7 +328,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           try {
             await reindexNote(params.title);
             return textResponse(`Updated and reindexed note: "${params.title}"`);
-          } catch {
+          } catch (reindexError) {
+            debug("Reindex after update failed:", reindexError);
             return textResponse(`Updated note: "${params.title}" (reindexing failed, run index-notes to update)`);
           }
         }
