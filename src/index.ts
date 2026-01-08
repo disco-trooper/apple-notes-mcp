@@ -381,6 +381,7 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error("Fatal error:", error);
+  const rawMessage = error instanceof Error ? error.message : String(error);
+  console.error("Fatal error:", sanitizeErrorMessage(rawMessage));
   process.exit(1);
 });
