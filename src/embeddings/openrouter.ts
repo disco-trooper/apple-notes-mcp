@@ -11,7 +11,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { DEFAULT_OPENROUTER_EMBEDDING_DIMS, DEFAULT_OPENROUTER_MODEL, EMBEDDING_CACHE_MAX_SIZE, OPENROUTER_TIMEOUT_MS } from "../config/constants.js";
+import { DEFAULT_OPENROUTER_EMBEDDING_DIMS, DEFAULT_OPENROUTER_MODEL, EMBEDDING_CACHE_MAX_SIZE, MAX_INPUT_LENGTH, MAX_RETRIES, OPENROUTER_TIMEOUT_MS, RATE_LIMIT_BACKOFF_BASE_MS } from "../config/constants.js";
 import { createDebugLogger } from "../utils/debug.js";
 
 // Configuration from environment
@@ -21,8 +21,6 @@ const EMBEDDING_DIMS = parseInt(process.env.EMBEDDING_DIMS || String(DEFAULT_OPE
 
 // Constants
 const API_URL = "https://openrouter.ai/api/v1/embeddings";
-const MAX_INPUT_LENGTH = 8000;
-const MAX_RETRIES = 3;
 
 // Debug logging
 const debug = createDebugLogger("OPENROUTER");
@@ -184,7 +182,7 @@ export async function getOpenRouterEmbedding(text: string): Promise<number[]> {
       // Handle rate limiting
       if (response.status === 429) {
         clearTimeout(timeoutId); // Clear timeout before sleeping
-        const waitTime = getBackoffDelay(attempt, 2000); // Longer base delay for rate limits
+        const waitTime = getBackoffDelay(attempt, RATE_LIMIT_BACKOFF_BASE_MS); // Longer base delay for rate limits
         debug(`Rate limited (429), waiting ${waitTime}ms before retry`);
         await sleep(waitTime);
         continue;

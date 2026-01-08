@@ -11,6 +11,7 @@ import { getEmbedding } from "../embeddings/index.js";
 import { getVectorStore, type NoteRecord } from "../db/lancedb.js";
 import { getAllNotes, getNoteByTitle, type NoteInfo } from "../notes/read.js";
 import { createDebugLogger } from "../utils/debug.js";
+import { EMBEDDING_DELAY_MS, MAX_INPUT_LENGTH } from "../config/constants.js";
 
 /**
  * Extract note title from folder/title key.
@@ -23,9 +24,6 @@ export function extractTitleFromKey(key: string): string {
 
 // Debug logging
 const debug = createDebugLogger("INDEX");
-
-// Delay between API calls to avoid rate limiting
-const EMBEDDING_DELAY_MS = 300;
 
 /**
  * Result of an indexing operation.
@@ -60,7 +58,7 @@ function sleep(ms: number): Promise<void> {
 /**
  * Truncate content to avoid token limits in embedding models.
  */
-function truncateContent(content: string, maxLength = 8000): string {
+function truncateContent(content: string, maxLength = MAX_INPUT_LENGTH): string {
   if (content.length <= maxLength) {
     return content;
   }

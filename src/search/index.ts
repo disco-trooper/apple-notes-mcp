@@ -9,7 +9,7 @@
 import { getEmbedding } from "../embeddings/index.js";
 import { getVectorStore } from "../db/lancedb.js";
 import type { DBSearchResult, SearchResult } from "../types/index.js";
-import { DEFAULT_SEARCH_LIMIT, PREVIEW_LENGTH, RRF_K } from "../config/constants.js";
+import { DEFAULT_SEARCH_LIMIT, FOLDER_FILTER_MULTIPLIER, HYBRID_SEARCH_MIN_FETCH, PREVIEW_LENGTH, PREVIEW_TRUNCATE_RATIO, RRF_K } from "../config/constants.js";
 import { createDebugLogger } from "../utils/debug.js";
 
 // Debug logging
@@ -68,7 +68,7 @@ function generatePreview(content: string, maxLength = PREVIEW_LENGTH): string {
   const truncated = cleaned.slice(0, maxLength);
   const lastSpace = truncated.lastIndexOf(" ");
 
-  if (lastSpace > maxLength * 0.7) {
+  if (lastSpace > maxLength * PREVIEW_TRUNCATE_RATIO) {
     return truncated.slice(0, lastSpace) + "...";
   }
 
@@ -106,7 +106,7 @@ async function vectorSearch(
   const queryVector = await getEmbedding(query);
 
   // Fetch more results than needed if filtering by folder
-  const fetchLimit = folder ? limit * 3 : limit;
+  const fetchLimit = folder ? limit * FOLDER_FILTER_MULTIPLIER : limit;
   const results = await store.search(queryVector, fetchLimit);
 
   const filtered = filterByFolder(results, folder);
@@ -126,7 +126,7 @@ async function keywordSearch(
   const store = getVectorStore();
 
   // Fetch more results than needed if filtering by folder
-  const fetchLimit = folder ? limit * 3 : limit;
+  const fetchLimit = folder ? limit * FOLDER_FILTER_MULTIPLIER : limit;
   const results = await store.searchFTS(query, fetchLimit);
 
   const filtered = filterByFolder(results, folder);
@@ -146,7 +146,7 @@ async function hybridSearch(
   const store = getVectorStore();
 
   // Fetch more results for RRF merging
-  const fetchLimit = Math.max(limit * 2, 40);
+  const fetchLimit = Math.max(limit * 2, HYBRID_SEARCH_MIN_FETCH);
 
   // Run both searches in parallel
   const [queryVector, ftsResults] = await Promise.all([

@@ -2,6 +2,8 @@
  * Error message sanitization for client responses.
  */
 
+import { ERROR_MESSAGE_MAX_LENGTH } from "../config/constants.js";
+
 const SAFE_ERROR_PATTERNS = [
   /^Note not found/,
   /^Title must be/,
@@ -40,5 +42,5 @@ export function sanitizeErrorMessage(message: string): string {
   }
 
   const firstLine = message.split("\n")[0];
-  return firstLine.substring(0, 200);
+  return firstLine.substring(0, ERROR_MESSAGE_MAX_LENGTH);
 }

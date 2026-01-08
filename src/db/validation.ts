@@ -2,8 +2,7 @@
  * Input validation for database operations.
  */
 
-// Maximum allowed title length
-const MAX_TITLE_LENGTH = 500;
+import { MAX_TITLE_LENGTH } from "../config/constants.js";
 
 // Pattern for allowed characters in titles
 // Allows: letters (any language), numbers, spaces, explicit safe punctuation only

@@ -22,3 +22,20 @@ export const OPENROUTER_TIMEOUT_MS = 30000;
 
 // Cache settings
 export const EMBEDDING_CACHE_MAX_SIZE = 1000;
+
+// Input processing
+export const MAX_INPUT_LENGTH = 8000;
+export const MAX_TITLE_LENGTH = 500;
+export const ERROR_MESSAGE_MAX_LENGTH = 200;
+
+// Retry and backoff
+export const MAX_RETRIES = 3;
+export const RATE_LIMIT_BACKOFF_BASE_MS = 2000;
+
+// Indexing
+export const EMBEDDING_DELAY_MS = 300;
+
+// Search tuning
+export const HYBRID_SEARCH_MIN_FETCH = 40;
+export const FOLDER_FILTER_MULTIPLIER = 3;
+export const PREVIEW_TRUNCATE_RATIO = 0.7;
