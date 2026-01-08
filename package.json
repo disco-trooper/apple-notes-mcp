@@ -8,7 +8,9 @@
     "start": "bun run src/index.ts",
     "setup": "bun run src/setup.ts",
     "dev": "bun --watch run src/index.ts",
-    "check": "bun run tsc --noEmit"
+    "check": "bun run tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
@@ -24,7 +26,8 @@
   "devDependencies": {
     "@types/bun": "^1.1.0",
     "@types/turndown": "^5.0.0",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "vitest": "^4.0.16"
   },
   "keywords": [
     "mcp",
