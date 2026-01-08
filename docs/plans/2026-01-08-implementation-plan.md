@@ -16,7 +16,7 @@
 
 ### Step 1.2: Basic MCP skeleton
 - [ ] Create `src/index.ts` with MCP server boilerplate
-- [ ] Register empty tool handlers for all 9 tools
+- [ ] Register empty tool handlers for all 10 tools
 - [ ] Add DEBUG logging infrastructure (stderr)
 - [ ] Test server starts without errors
 
@@ -25,8 +25,9 @@
 ### Step 2.1: Database layer (`src/db/lancedb.ts`)
 - [ ] Define VectorStore interface (for future extensibility)
 - [ ] Connect to LanceDB (`~/.apple-notes-mcp/data/`)
-- [ ] Define schema (title, content, vector, folder, created, modified)
-- [ ] Implement `index()`, `search()`, `searchFTS()`, `count()`, `clear()`
+- [ ] Define schema (title, content, vector, folder, created, modified, indexed_at)
+- [ ] Implement `index()`, `update()`, `delete()`, `search()`, `searchFTS()`, `count()`, `clear()`
+- [ ] Implement `getByTitle()` for single-note operations
 - [ ] Test with mock data
 
 ### Step 2.2: Embedding - Local (`src/embeddings/local.ts`)
@@ -71,18 +72,31 @@
 ## Phase 4: Search
 
 ### Step 4.1: Indexer (`src/search/indexer.ts`)
-- [ ] Fetch all notes with folder info
+- [ ] Fetch all notes with folder info and modified timestamps
 - [ ] Convert HTML → Markdown + extract attachments
 - [ ] Generate embeddings (batch with 300ms delay)
-- [ ] Store in LanceDB via VectorStore interface
+- [ ] Store in LanceDB via VectorStore interface (with indexed_at)
 - [ ] Return final summary (count, time, errors)
 
-### Step 4.2: Hybrid search (`src/search/index.ts`)
+### Step 4.2: Incremental indexer
+- [ ] Compare Apple Notes modified vs LanceDB indexed_at
+- [ ] Detect: new notes (INSERT), changed notes (UPDATE), deleted notes (DELETE)
+- [ ] Only embed changed/new notes
+- [ ] Return breakdown summary (added, updated, deleted, skipped)
+
+### Step 4.3: Single-note reindex
+- [ ] `reindexNote(title)` - resolve title, fetch, embed, update in DB
+- [ ] Update indexed_at timestamp
+- [ ] Used by `update-note` when `reindex: true`
+
+### Step 4.4: Hybrid search (`src/search/index.ts`)
 - [ ] Vector search via VectorStore
-- [ ] FTS search via VectorStore
-- [ ] RRF (Reciprocal Rank Fusion) merge
+- [ ] FTS search via VectorStore (keyword-only mode)
+- [ ] RRF (Reciprocal Rank Fusion) merge (hybrid mode)
+- [ ] Support `mode` parameter: hybrid, keyword, semantic
 - [ ] Apply folder filter if provided
-- [ ] Return top N results with preview (200 chars)
+- [ ] Support `include_content` parameter (preview vs full)
+- [ ] Return top N results
 - [ ] Test search quality
 
 ## Phase 5: MCP Tools
@@ -91,20 +105,24 @@
 - [ ] `list-notes` - count from VectorStore
 - [ ] `get-note` - fetch by title (with folder resolution)
 - [ ] `list-folders` - all folders from Apple Notes
-- [ ] `search-notes` - hybrid search with optional folder filter
-- [ ] `index-notes` - trigger indexing, return summary
+- [ ] `search-notes` - params: query, folder?, limit?, mode?, include_content?
+- [ ] `index-notes` - params: mode? (full/incremental), force?
+- [ ] `reindex-note` - params: title
 
 ### Step 5.2: Write tools
 - [ ] `create-note` - with READONLY check, duplicate check
-- [ ] `update-note` - with READONLY check, title resolution
+- [ ] `update-note` - params: title, content, reindex? (default true)
 - [ ] `delete-note` - with READONLY check, confirm requirement
 - [ ] `move-note` - with READONLY check, title resolution
 
 ### Step 5.3: Integration test
-- [ ] Test all 9 tools via MCP protocol
+- [ ] Test all 10 tools via MCP protocol
 - [ ] Test READONLY_MODE blocks writes
 - [ ] Test error handling (duplicate, not found, no confirm)
 - [ ] Test folder prefix disambiguation
+- [ ] Test incremental vs full indexing
+- [ ] Test search modes (hybrid, keyword, semantic)
+- [ ] Test include_content parameter
 
 ## Phase 6: Setup Wizard
 
@@ -141,7 +159,7 @@
 - [ ] Installation instructions (git clone + bun install)
 - [ ] Quick start (bun run setup)
 - [ ] Configuration reference (env vars table)
-- [ ] Tool reference (all 9 tools with examples)
+- [ ] Tool reference (all 10 tools with examples)
 - [ ] Claude Code setup guide
 - [ ] Troubleshooting section
 - [ ] Contributing: "PRs welcome" + basic guidelines
@@ -212,7 +230,8 @@ async function resolveTitle(input: string): Promise<string> {
 interface SearchResult {
   title: string;
   folder: string;
-  preview: string;      // First 200 chars
+  preview: string;      // First 200 chars (always included)
+  content?: string;     // Full content (only if include_content: true)
   modified: string;     // ISO date
   score: number;        // RRF score
 }

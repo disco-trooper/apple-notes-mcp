@@ -24,19 +24,44 @@ Unified MCP server for Apple Notes combining semantic search and CRUD operations
 
 ## Features
 
-### Tools (9 total)
+### Tools (10 total)
 
 | Tool | Description | CRUD | Parameters |
 |------|-------------|------|------------|
-| `search-notes` | Hybrid vector + fulltext search | Read | `query`, `folder?`, `limit?` |
-| `index-notes` | Index all notes for semantic search | Read | - |
+| `search-notes` | Hybrid vector + fulltext search | Read | `query`, `folder?`, `limit?`, `mode?`, `include_content?` |
+| `index-notes` | Index notes for semantic search | Read | `mode?`, `force?` |
+| `reindex-note` | Re-index single note | Read | `title` |
 | `list-notes` | Count indexed notes | Read | - |
 | `get-note` | Get note by title | Read | `title` (supports folder prefix) |
 | `create-note` | Create new note | Write | `title`, `content`, `folder?` |
-| `update-note` | Update existing note | Write | `title`, `content` |
+| `update-note` | Update existing note | Write | `title`, `content`, `reindex?` |
 | `delete-note` | Delete note | Write | `title`, `confirm: true` (required) |
 | `list-folders` | List all folders | Read | - |
 | `move-note` | Move note to folder | Write | `title`, `folder` |
+
+### Tool Parameters Detail
+
+**`search-notes`:**
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `query` | string | required | Search query |
+| `folder` | string | - | Filter by folder |
+| `limit` | number | 20 | Max results |
+| `mode` | enum | `"hybrid"` | `"hybrid"` \| `"keyword"` \| `"semantic"` |
+| `include_content` | boolean | `false` | Return full content instead of preview |
+
+**`index-notes`:**
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `mode` | enum | `"incremental"` | `"full"` \| `"incremental"` |
+| `force` | boolean | `false` | Ignore TTL, force reindex |
+
+**`update-note`:**
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `title` | string | required | Note title (with folder prefix if needed) |
+| `content` | string | required | New content (Markdown) |
+| `reindex` | boolean | `true` | Re-embed after update |
 
 ### Note Identification
 
@@ -232,7 +257,9 @@ MCP Tool → READONLY check → Validation → marked (MD→HTML) → JXA → Ap
 
 - **Vector DB:** LanceDB (embedded, local)
 - **Data location:** `~/.apple-notes-mcp/data/`
-- **Schema:** `{ title, content, vector, folder, created, modified }`
+- **Schema:** `{ title, content, vector, folder, created, modified, indexed_at }`
+
+The `indexed_at` field tracks when each note's embedding was last generated. This enables incremental indexing.
 
 ### Logging
 
@@ -254,10 +281,36 @@ Three modes available (configured via `AUTO_INDEX`):
 - `on-search`: Auto-check before each search (fresh but slower)
 - `ttl:Xh`: Re-index when older than X hours, warn when stale
 
+### Incremental Indexing
+
+**Full vs Incremental:**
+- `index-notes mode: "full"` - Drop all, re-embed everything
+- `index-notes mode: "incremental"` (default) - Only process changes
+
+**Incremental algorithm:**
+```
+1. Fetch all notes from Apple Notes with modified timestamps
+2. Compare with indexed_at in LanceDB:
+   - modified > indexed_at → re-embed (UPDATE)
+   - New note (not in DB) → embed (INSERT)
+   - Note deleted from Apple Notes → DELETE from DB
+   - modified <= indexed_at → SKIP
+3. Return summary: "3 added, 5 updated, 1 deleted, 291 skipped"
+```
+
+**Single-note vs Incremental (no conflict):**
+
+Both update `indexed_at`, so they complement each other:
+
+| Scenario | Result |
+|----------|--------|
+| `update-note` with `reindex: true`, then `index-notes incremental` | Incremental SKIPs (already indexed) |
+| `update-note` with `reindex: false`, then `index-notes incremental` | Incremental catches the change |
+| `reindex-note`, then `index-notes incremental` | Incremental SKIPs (already indexed) |
+
 ### Progress Reporting
 - `index-notes` blocks until complete
-- Returns final summary with timing
-- v2: potential incremental indexing
+- Returns final summary with timing and breakdown (added/updated/deleted/skipped)
 
 ## Error Handling
 
@@ -296,7 +349,7 @@ Three modes available (configured via `AUTO_INDEX`):
 2. Installation (git clone + bun install)
 3. Quick start (bun run setup)
 4. Configuration reference (env vars table)
-5. Tool reference (all 9 tools with examples)
+5. Tool reference (all 10 tools with examples)
 6. Claude Code setup guide
 7. Troubleshooting
 8. Contributing: "PRs welcome" + basic guidelines
@@ -304,9 +357,8 @@ Three modes available (configured via `AUTO_INDEX`):
 ## Future Considerations (v2+)
 
 - Vector DB abstraction (Chroma, SQLite-vss implementations)
-- Incremental indexing (only changed notes)
-- Staleness warning in search
 - npm publish for easier distribution
 - Full attachment content (OCR for images, PDF text extraction)
 - iCloud sync awareness
+- Batch operations (update/delete multiple notes)
 - CONTRIBUTING.md if community grows
