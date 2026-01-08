@@ -11,8 +11,9 @@
  */
 
 import { createHash } from "node:crypto";
-import { DEFAULT_OPENROUTER_EMBEDDING_DIMS, DEFAULT_OPENROUTER_MODEL, EMBEDDING_CACHE_MAX_SIZE, MAX_INPUT_LENGTH, MAX_RETRIES, OPENROUTER_TIMEOUT_MS, RATE_LIMIT_BACKOFF_BASE_MS } from "../config/constants.js";
+import { DEFAULT_OPENROUTER_EMBEDDING_DIMS, DEFAULT_OPENROUTER_MODEL, EMBEDDING_CACHE_MAX_SIZE, MAX_RETRIES, OPENROUTER_TIMEOUT_MS, RATE_LIMIT_BACKOFF_BASE_MS } from "../config/constants.js";
 import { createDebugLogger } from "../utils/debug.js";
+import { truncateForEmbedding } from "../utils/text.js";
 
 // Configuration from environment
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
@@ -94,17 +95,6 @@ export function getCacheKey(text: string): string {
 }
 
 /**
- * Truncate input text to maximum allowed length
- */
-function truncateInput(text: string): string {
-  if (text.length <= MAX_INPUT_LENGTH) {
-    return text;
-  }
-  debug(`Truncating input from ${text.length} to ${MAX_INPUT_LENGTH} chars`);
-  return text.substring(0, MAX_INPUT_LENGTH);
-}
-
-/**
  * OpenRouter API error with additional context
  */
 class OpenRouterError extends Error {
@@ -140,7 +130,7 @@ export async function getOpenRouterEmbedding(text: string): Promise<number[]> {
   }
 
   // Truncate input first - cache key must match actual embedded text
-  const truncatedText = truncateInput(text);
+  const truncatedText = truncateForEmbedding(text);
 
   // Check cache using truncated text hash
   const cacheKey = getCacheKey(truncatedText);
