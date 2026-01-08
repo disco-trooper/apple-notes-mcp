@@ -19,6 +19,14 @@ MCP server for Apple Notes with semantic search and CRUD operations. Claude sear
 
 ## Installation
 
+### npm (recommended)
+
+```bash
+npm install -g @disco_trooper/apple-notes-mcp
+```
+
+### From source
+
 ```bash
 git clone https://github.com/disco-trooper/apple-notes-mcp.git
 cd apple-notes-mcp
