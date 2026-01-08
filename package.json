@@ -1,5 +1,5 @@
 {
-  "name": "apple-notes-mcp",
+  "name": "@disco_trooper/apple-notes-mcp",
   "version": "1.0.0",
   "description": "MCP server for Apple Notes with semantic search and CRUD operations",
   "type": "module",
@@ -40,6 +40,20 @@
   ],
   "author": "disco-trooper",
   "license": "MIT",
+  "bin": {
+    "apple-notes-mcp": "./src/index.ts"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "CLAUDE.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "darwin"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/disco-trooper/apple-notes-mcp"
