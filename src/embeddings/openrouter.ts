@@ -11,7 +11,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { DEFAULT_OPENROUTER_EMBEDDING_DIMS, DEFAULT_OPENROUTER_MODEL } from "../config/constants.js";
+import { DEFAULT_OPENROUTER_EMBEDDING_DIMS, DEFAULT_OPENROUTER_MODEL, OPENROUTER_TIMEOUT_MS } from "../config/constants.js";
 import { createDebugLogger } from "../utils/debug.js";
 
 // Configuration from environment
@@ -119,6 +119,10 @@ export async function getOpenRouterEmbedding(text: string): Promise<number[]> {
   let lastError: Error | null = null;
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    // Create abort controller for timeout
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), OPENROUTER_TIMEOUT_MS);
+
     try {
       debug(`Attempt ${attempt + 1}/${MAX_RETRIES}`);
 
@@ -135,6 +139,7 @@ export async function getOpenRouterEmbedding(text: string): Promise<number[]> {
           input: truncatedText,
           dimensions: EMBEDDING_DIMS,
         }),
+        signal: controller.signal,
       });
 
       // Handle rate limiting
@@ -184,6 +189,15 @@ export async function getOpenRouterEmbedding(text: string): Promise<number[]> {
 
       return embedding;
     } catch (error) {
+      // Handle timeout errors
+      if (error instanceof Error && error.name === "AbortError") {
+        debug(`Request timed out after ${OPENROUTER_TIMEOUT_MS}ms`);
+        throw new OpenRouterError(
+          `Request timed out after ${OPENROUTER_TIMEOUT_MS}ms`,
+          408
+        );
+      }
+
       lastError = error instanceof Error ? error : new Error(String(error));
 
       // Don't retry on non-retryable errors
@@ -201,6 +215,8 @@ export async function getOpenRouterEmbedding(text: string): Promise<number[]> {
         debug(`Error: ${lastError.message}, retrying in ${waitTime}ms`);
         await sleep(waitTime);
       }
+    } finally {
+      clearTimeout(timeoutId);
     }
   }
 
