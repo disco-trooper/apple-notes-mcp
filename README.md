@@ -47,7 +47,7 @@ Configuration is stored in `.env` file:
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `OPENROUTER_API_KEY` | OpenRouter API key (enables cloud embeddings) | - |
-| `EMBEDDING_MODEL` | OpenRouter model name | `qwen/qwen3-embedding-8b` |
+| `EMBEDDING_MODEL` | Model name (local or OpenRouter) | `Xenova/multilingual-e5-small` |
 | `EMBEDDING_DIMS` | Embedding dimensions | `4096` |
 | `READONLY_MODE` | Block all write operations | `false` |
 | `INDEX_TTL` | Auto-reindex interval in seconds | - |

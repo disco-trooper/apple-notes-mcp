@@ -26,44 +26,6 @@ export function checkReadOnly(): void {
 }
 
 /**
- * Check if a note with the given title already exists.
- *
- * @param title - Note title to check
- * @param folder - Optional folder to check in
- * @returns true if note exists, false otherwise
- */
-async function noteExists(title: string, folder?: string): Promise<boolean> {
-  const escapedTitle = JSON.stringify(title);
-  const escapedFolder = folder ? JSON.stringify(folder) : "null";
-
-  const result = await runJxa(`
-    const app = Application('Notes');
-    const searchTitle = ${escapedTitle};
-    const searchFolder = ${escapedFolder};
-
-    const folders = app.folders();
-
-    for (const folder of folders) {
-      const folderName = folder.name();
-
-      // Skip if folder filter is specified and doesn't match
-      if (searchFolder !== null && folderName !== searchFolder) {
-        continue;
-      }
-
-      const notes = folder.notes.whose({name: searchTitle})();
-      if (notes.length > 0) {
-        return "true";
-      }
-    }
-
-    return "false";
-  `);
-
-  return result === "true";
-}
-
-/**
  * Convert Markdown content to HTML for Apple Notes.
  *
  * @param markdown - Markdown content
@@ -97,13 +59,6 @@ export async function createNote(
   checkReadOnly();
 
   debug(`Creating note: "${title}" in folder: "${folder || "Notes"}"`);
-
-  // Check for duplicates
-  const exists = await noteExists(title, folder);
-  if (exists) {
-    const location = folder ? `${folder}/${title}` : title;
-    throw new Error(`Note already exists: "${location}"`);
-  }
 
   // Convert Markdown to HTML
   const htmlContent = markdownToHtml(content);

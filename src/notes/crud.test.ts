@@ -67,17 +67,17 @@ describe("createNote", () => {
     await expect(createNote("Test", "Content")).rejects.toThrow("read-only mode");
   });
 
-  it("should throw if note already exists", async () => {
-    vi.mocked(runJxa).mockResolvedValueOnce("true"); // noteExists returns true
-    await expect(createNote("Existing Note", "Content")).rejects.toThrow("already exists");
-  });
-
   it("should create note successfully", async () => {
-    vi.mocked(runJxa)
-      .mockResolvedValueOnce("false") // noteExists returns false
-      .mockResolvedValueOnce("ok");   // createNote succeeds
+    vi.mocked(runJxa).mockResolvedValueOnce("ok");
 
     await expect(createNote("New Note", "Content", "Work")).resolves.toBeUndefined();
+  });
+
+  it("should allow duplicate titles (Apple Notes uses IDs)", async () => {
+    vi.mocked(runJxa).mockResolvedValueOnce("ok");
+
+    // Should not throw even if a note with same title exists
+    await expect(createNote("Existing Note", "Content")).resolves.toBeUndefined();
   });
 });
 
