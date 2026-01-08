@@ -5,8 +5,10 @@
 import { MAX_TITLE_LENGTH } from "../config/constants.js";
 
 // Pattern for allowed characters in titles
-// Allows: letters (any language), numbers, spaces, explicit safe punctuation only
-const SAFE_TITLE_PATTERN = /^[\p{L}\p{N}\p{Z}.,!?;:_()[\]{}'"@#$%&*+=~-]+$/u;
+// Allows: letters, numbers, whitespace, punctuation, symbols, and most printable chars
+// Security is handled by escapeForFilter(), so we can be permissive here
+// Only reject control characters and null bytes
+const SAFE_TITLE_PATTERN = /^[^\x00-\x1f\x7f]+$/u;
 
 /**
  * Validate and sanitize a note title for database operations.

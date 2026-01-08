@@ -24,8 +24,8 @@ describe("validateTitle", () => {
   });
 });
 
-describe("validateTitle - restricted punctuation", () => {
-  it("allows common safe punctuation", () => {
+describe("validateTitle - allowed characters", () => {
+  it("allows common punctuation", () => {
     expect(validateTitle("Note: My Title")).toBe("Note: My Title");
     expect(validateTitle("Meeting (2024-01-08)")).toBe("Meeting (2024-01-08)");
     expect(validateTitle("Q&A Session")).toBe("Q&A Session");
@@ -34,17 +34,25 @@ describe("validateTitle - restricted punctuation", () => {
     expect(validateTitle("50% Complete!")).toBe("50% Complete!");
   });
 
-  it("rejects backticks", () => {
-    expect(() => validateTitle("Note `code` here")).toThrow("invalid characters");
+  it("allows special characters that appear in real note titles", () => {
+    // Forward slashes (common in paths/dates)
+    expect(validateTitle("Airdrops/zisky")).toBe("Airdrops/zisky");
+    // Apostrophes
+    expect(validateTitle("Disco's Notes")).toBe("Disco's Notes");
+    // Unicode symbols
+    expect(validateTitle("Task ➜ Done")).toBe("Task ➜ Done");
+    // Ellipsis
+    expect(validateTitle("Long title…")).toBe("Long title…");
+    // Backticks, pipes, angle brackets (now allowed)
+    expect(validateTitle("Note `code` here")).toBe("Note `code` here");
+    expect(validateTitle("Option A | Option B")).toBe("Option A | Option B");
+    expect(validateTitle("A > B < C")).toBe("A > B < C");
   });
 
-  it("rejects pipe character", () => {
-    expect(() => validateTitle("Option A | Option B")).toThrow("invalid characters");
-  });
-
-  it("rejects angle brackets", () => {
-    expect(() => validateTitle("Note <script>")).toThrow("invalid characters");
-    expect(() => validateTitle("A > B")).toThrow("invalid characters");
+  it("rejects control characters", () => {
+    expect(() => validateTitle("Note\x00null")).toThrow("invalid characters");
+    expect(() => validateTitle("Note\x1ftab")).toThrow("invalid characters");
+    expect(() => validateTitle("Note\x7fdel")).toThrow("invalid characters");
   });
 });
 
