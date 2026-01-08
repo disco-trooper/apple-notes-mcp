@@ -7,7 +7,9 @@
  */
 
 import { getEmbedding } from "../embeddings/index.js";
-import { getVectorStore, type SearchResult as DBSearchResult } from "../db/lancedb.js";
+import { getVectorStore } from "../db/lancedb.js";
+import type { DBSearchResult, SearchResult } from "../types/index.js";
+import { DEFAULT_SEARCH_LIMIT, PREVIEW_LENGTH, RRF_K } from "../config/constants.js";
 
 // Debug logging
 const DEBUG = process.env.DEBUG === "true";
@@ -39,26 +41,8 @@ export interface SearchOptions {
   include_content?: boolean;
 }
 
-/**
- * Search result returned to clients.
- */
-export interface SearchResult {
-  /** Note title */
-  title: string;
-  /** Folder containing the note */
-  folder: string;
-  /** Preview of content (200 chars) or full content if include_content=true */
-  preview: string;
-  /** Full content (only when include_content=true) */
-  content?: string;
-  /** Last modified date (ISO string) */
-  modified: string;
-  /** Combined relevance score (higher = more relevant) */
-  score: number;
-}
-
-// RRF constant (standard value from literature)
-const RRF_K = 60;
+// SearchResult is imported from ../types/index.js
+// RRF_K is imported from ../config/constants.js
 
 /**
  * Calculate RRF score for a result at a given rank.
@@ -70,9 +54,9 @@ function rrfScore(rank: number): number {
 }
 
 /**
- * Generate a preview of content (first 200 characters).
+ * Generate a preview of content (first N characters, default from PREVIEW_LENGTH constant).
  */
-function generatePreview(content: string, maxLength = 200): string {
+function generatePreview(content: string, maxLength = PREVIEW_LENGTH): string {
   if (!content) {
     return "";
   }
@@ -243,7 +227,7 @@ export async function searchNotes(
 ): Promise<SearchResult[]> {
   const {
     folder,
-    limit = 20,
+    limit = DEFAULT_SEARCH_LIMIT,
     mode = "hybrid",
     include_content = false,
   } = options;
@@ -297,3 +281,4 @@ export async function searchNotes(
 
 // Re-export types for convenience
 export type { SearchMode as Mode };
+export type { SearchResult } from "../types/index.js";

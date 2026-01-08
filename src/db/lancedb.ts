@@ -2,6 +2,7 @@ import * as lancedb from "@lancedb/lancedb";
 import path from "node:path";
 import os from "node:os";
 import { validateTitle, escapeForFilter } from "./validation.js";
+import type { DBSearchResult as SearchResult } from "../types/index.js";
 
 // Schema for stored notes
 export interface NoteRecord {
@@ -15,14 +16,8 @@ export interface NoteRecord {
   [key: string]: unknown; // Index signature for LanceDB compatibility
 }
 
-// Search result with score
-export interface SearchResult {
-  title: string;
-  folder: string;
-  content: string;
-  modified: string;
-  score: number;
-}
+// SearchResult is imported from ../types/index.js as DBSearchResult
+export type { SearchResult };
 
 // VectorStore interface for future extensibility
 export interface VectorStore {
