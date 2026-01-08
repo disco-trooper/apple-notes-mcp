@@ -7,14 +7,10 @@
 
 import { runJxa } from "run-jxa";
 import TurndownService from "turndown";
+import { createDebugLogger } from "../utils/debug.js";
 
-// Debug logging to stderr (never pollute stdout/MCP protocol)
-const DEBUG = process.env.DEBUG === "true";
-function debug(...args: unknown[]): void {
-  if (DEBUG) {
-    console.error("[DEBUG:notes/read]", ...args);
-  }
-}
+// Debug logging
+const debug = createDebugLogger("NOTES");
 
 // Initialize Turndown for HTML to Markdown conversion
 const turndownService = new TurndownService({

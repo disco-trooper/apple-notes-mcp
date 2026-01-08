@@ -3,6 +3,7 @@ import path from "node:path";
 import os from "node:os";
 import { validateTitle, escapeForFilter } from "./validation.js";
 import type { DBSearchResult as SearchResult } from "../types/index.js";
+import { createDebugLogger } from "../utils/debug.js";
 
 // Schema for stored notes
 export interface NoteRecord {
@@ -33,12 +34,7 @@ export interface VectorStore {
 }
 
 // Debug logging
-const DEBUG = process.env.DEBUG === "true";
-function debug(...args: unknown[]) {
-  if (DEBUG) {
-    console.error("[DB]", ...args);
-  }
-}
+const debug = createDebugLogger("DB");
 
 // LanceDB implementation
 export class LanceDBStore implements VectorStore {

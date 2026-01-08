@@ -6,6 +6,7 @@
  */
 
 import { DEFAULT_LOCAL_EMBEDDING_DIMS } from "../config/constants.js";
+import { createDebugLogger } from "../utils/debug.js";
 
 // Model configuration
 const DEFAULT_MODEL = "Xenova/multilingual-e5-small";
@@ -19,13 +20,8 @@ const MODEL_DIMENSIONS: Record<string, number> = {
   "Xenova/gte-small": 384,
 };
 
-// Debug logging to stderr (never pollute stdout/MCP protocol)
-const DEBUG = process.env.DEBUG === "true";
-function debug(...args: unknown[]) {
-  if (DEBUG) {
-    console.error("[EMBED]", ...args);
-  }
-}
+// Debug logging
+const debug = createDebugLogger("LOCAL");
 
 // Lazy-loaded pipeline
 type FeatureExtractionPipeline = (

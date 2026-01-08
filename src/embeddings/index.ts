@@ -8,14 +8,10 @@
 
 import { getOpenRouterEmbedding, getOpenRouterDimensions } from "./openrouter.js";
 import { getLocalEmbedding, getLocalDimensions, getLocalModelName } from "./local.js";
+import { createDebugLogger } from "../utils/debug.js";
 
-// Debug logging to stderr
-const DEBUG = process.env.DEBUG === "true";
-function debug(...args: unknown[]) {
-  if (DEBUG) {
-    console.error("[EMBED]", ...args);
-  }
-}
+// Debug logging
+const debug = createDebugLogger("EMBED");
 
 // Provider type
 export type EmbeddingProvider = "openrouter" | "local";

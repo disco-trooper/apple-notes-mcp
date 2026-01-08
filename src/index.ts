@@ -18,13 +18,9 @@ import { createNote, updateNote, deleteNote, moveNote } from "./notes/crud.js";
 import { searchNotes } from "./search/index.js";
 import { indexNotes, reindexNote } from "./search/indexer.js";
 
-// Debug logging to stderr (never pollute stdout/MCP protocol)
-const DEBUG = process.env.DEBUG === "true";
-function debug(...args: unknown[]) {
-  if (DEBUG) {
-    console.error("[DEBUG]", ...args);
-  }
-}
+// Debug logging
+import { createDebugLogger } from "./utils/debug.js";
+const debug = createDebugLogger("MCP");
 
 // Tool parameter schemas
 const SearchNotesSchema = z.object({

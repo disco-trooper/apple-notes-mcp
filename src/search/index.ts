@@ -10,14 +10,10 @@ import { getEmbedding } from "../embeddings/index.js";
 import { getVectorStore } from "../db/lancedb.js";
 import type { DBSearchResult, SearchResult } from "../types/index.js";
 import { DEFAULT_SEARCH_LIMIT, PREVIEW_LENGTH, RRF_K } from "../config/constants.js";
+import { createDebugLogger } from "../utils/debug.js";
 
 // Debug logging
-const DEBUG = process.env.DEBUG === "true";
-function debug(...args: unknown[]) {
-  if (DEBUG) {
-    console.error("[SEARCH]", ...args);
-  }
-}
+const debug = createDebugLogger("SEARCH");
 
 /**
  * Search mode options.

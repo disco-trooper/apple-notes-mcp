@@ -11,6 +11,7 @@
  */
 
 import { DEFAULT_OPENROUTER_EMBEDDING_DIMS, DEFAULT_OPENROUTER_MODEL } from "../config/constants.js";
+import { createDebugLogger } from "../utils/debug.js";
 
 // Configuration from environment
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
@@ -23,13 +24,8 @@ const MAX_INPUT_LENGTH = 8000;
 const MAX_RETRIES = 3;
 const CACHE_KEY_LENGTH = 100;
 
-// Debug logging to stderr (never pollute stdout/MCP protocol)
-const DEBUG = process.env.DEBUG === "true";
-function debug(...args: unknown[]): void {
-  if (DEBUG) {
-    console.error("[DEBUG:embeddings]", ...args);
-  }
-}
+// Debug logging
+const debug = createDebugLogger("OPENROUTER");
 
 // Embedding cache to reduce API calls
 // Key: first 100 chars of input text

@@ -8,14 +8,10 @@
 import { runJxa } from "run-jxa";
 import { marked } from "marked";
 import { resolveNoteTitle } from "./read.js";
+import { createDebugLogger } from "../utils/debug.js";
 
-// Debug logging to stderr (never pollute stdout/MCP protocol)
-const DEBUG = process.env.DEBUG === "true";
-function debug(...args: unknown[]) {
-  if (DEBUG) {
-    console.error("[CRUD]", ...args);
-  }
-}
+// Debug logging
+const debug = createDebugLogger("CRUD");
 
 /**
  * Check if READONLY_MODE is enabled and throw if so.
