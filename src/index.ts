@@ -18,8 +18,9 @@ import { createNote, updateNote, deleteNote, moveNote } from "./notes/crud.js";
 import { searchNotes } from "./search/index.js";
 import { indexNotes, reindexNote } from "./search/indexer.js";
 
-// Debug logging
+// Debug logging and error handling
 import { createDebugLogger } from "./utils/debug.js";
+import { sanitizeErrorMessage } from "./utils/errors.js";
 const debug = createDebugLogger("MCP");
 
 // Tool parameter schemas
@@ -362,9 +363,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     // Handle other errors gracefully
-    const message = error instanceof Error ? error.message : String(error);
+    const rawMessage = error instanceof Error ? error.message : String(error);
     debug("Tool error:", error);
-    return errorResponse(message);
+    return errorResponse(sanitizeErrorMessage(rawMessage));
   }
 });
 
