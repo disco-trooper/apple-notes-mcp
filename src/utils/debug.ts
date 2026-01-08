@@ -3,14 +3,14 @@
  * Logs to stderr to avoid polluting stdout/MCP protocol.
  */
 
-const IS_DEBUG = process.env.DEBUG === "true";
-
 /**
  * Create a debug logger with a specific prefix.
+ * Checks DEBUG env var at call time for runtime control.
  */
 export function createDebugLogger(prefix: string) {
   return (...args: unknown[]): void => {
-    if (IS_DEBUG) {
+    // Check at call time, not load time
+    if (process.env.DEBUG === "true") {
       console.error(`[${prefix}]`, ...args);
     }
   };
@@ -18,7 +18,8 @@ export function createDebugLogger(prefix: string) {
 
 /**
  * Check if debug mode is enabled.
+ * Checks at call time for runtime control.
  */
 export function isDebugEnabled(): boolean {
-  return IS_DEBUG;
+  return process.env.DEBUG === "true";
 }
