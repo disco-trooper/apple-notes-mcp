@@ -486,7 +486,15 @@ async function main(): Promise<void> {
     }
 
     const mode = indexMode as "full" | "incremental";
-    s.start(`${mode === "full" ? "Full" : "Incremental"} indexing (this may take a while)...`);
+    const indexingMsg = `${mode === "full" ? "Full" : "Incremental"} indexing...`;
+
+    // Don't use spinner in debug mode - it conflicts with debug output
+    if (!debug) {
+      s.start(indexingMsg);
+    } else {
+      p.log.info(indexingMsg);
+    }
+
     try {
       // Reload environment with new config
       const dotenv = await import("dotenv");
@@ -494,11 +502,17 @@ async function main(): Promise<void> {
 
       const result = await runIndexing(mode);
       const skippedInfo = result.skipped ? `, ${result.skipped} unchanged` : "";
-      s.stop(
-        `Indexed ${result.count} notes in ${(result.timeMs / 1000).toFixed(1)}s${skippedInfo}`
-      );
+      const doneMsg = `Indexed ${result.count} notes in ${(result.timeMs / 1000).toFixed(1)}s${skippedInfo}`;
+
+      if (!debug) {
+        s.stop(doneMsg);
+      } else {
+        p.log.success(doneMsg);
+      }
     } catch (error) {
-      s.stop("Indexing failed");
+      if (!debug) {
+        s.stop("Indexing failed");
+      }
       p.log.error(
         `Error: ${error instanceof Error ? error.message : String(error)}`
       );
