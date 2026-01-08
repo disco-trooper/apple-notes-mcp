@@ -10,6 +10,7 @@
  * - Debug logging to stderr
  */
 
+import { createHash } from "node:crypto";
 import { DEFAULT_OPENROUTER_EMBEDDING_DIMS, DEFAULT_OPENROUTER_MODEL } from "../config/constants.js";
 import { createDebugLogger } from "../utils/debug.js";
 
@@ -22,13 +23,12 @@ const EMBEDDING_DIMS = parseInt(process.env.EMBEDDING_DIMS || String(DEFAULT_OPE
 const API_URL = "https://openrouter.ai/api/v1/embeddings";
 const MAX_INPUT_LENGTH = 8000;
 const MAX_RETRIES = 3;
-const CACHE_KEY_LENGTH = 100;
 
 // Debug logging
 const debug = createDebugLogger("OPENROUTER");
 
 // Embedding cache to reduce API calls
-// Key: first 100 chars of input text
+// Key: SHA-256 hash of input text
 // Value: embedding vector
 const embeddingCache = new Map<string, number[]>();
 
@@ -50,11 +50,10 @@ function getBackoffDelay(attempt: number, baseMs: number = 1000): number {
 }
 
 /**
- * Generate cache key from input text
- * Uses first 100 characters for efficiency
+ * Generate cache key from input text using SHA-256 hash.
  */
-function getCacheKey(text: string): string {
-  return text.slice(0, CACHE_KEY_LENGTH);
+export function getCacheKey(text: string): string {
+  return createHash("sha256").update(text).digest("hex");
 }
 
 /**
@@ -86,7 +85,7 @@ class OpenRouterError extends Error {
  * Get embedding vector for text using OpenRouter API
  *
  * Features:
- * - Caches results based on first 100 chars of input
+ * - Caches results based on SHA-256 hash of input
  * - Retries up to 3 times with exponential backoff
  * - Handles rate limiting (429) with longer delays
  * - Truncates input to 8000 chars
