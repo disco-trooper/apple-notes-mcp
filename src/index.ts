@@ -7,6 +7,13 @@ import {
 import { z } from "zod";
 import "dotenv/config";
 
+// Import implementations
+import { getVectorStore } from "./db/lancedb.js";
+import { getNoteByTitle, getAllFolders } from "./notes/read.js";
+import { createNote, updateNote, deleteNote, moveNote } from "./notes/crud.js";
+import { searchNotes } from "./search/index.js";
+import { indexNotes, reindexNote } from "./search/indexer.js";
+
 // Debug logging to stderr (never pollute stdout/MCP protocol)
 const DEBUG = process.env.DEBUG === "true";
 function debug(...args: unknown[]) {
@@ -237,49 +244,93 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // Read tools
       case "search-notes": {
         const params = SearchNotesSchema.parse(args);
-        // TODO: Implement search
-        return textResponse(`[TODO] Search for: "${params.query}" (mode: ${params.mode})`);
+        const results = await searchNotes(params.query, {
+          folder: params.folder,
+          limit: params.limit,
+          mode: params.mode,
+          include_content: params.include_content,
+        });
+
+        if (results.length === 0) {
+          return textResponse("No notes found matching your query.");
+        }
+
+        return textResponse(JSON.stringify(results, null, 2));
       }
 
       case "index-notes": {
         const params = IndexNotesSchema.parse(args);
-        // TODO: Implement indexing
-        return textResponse(`[TODO] Index notes (mode: ${params.mode}, force: ${params.force})`);
+        const result = await indexNotes(params.mode);
+
+        let message = `Indexed ${result.indexed} notes in ${(result.timeMs / 1000).toFixed(1)}s`;
+
+        if (result.breakdown) {
+          message += ` (added: ${result.breakdown.added}, updated: ${result.breakdown.updated}, deleted: ${result.breakdown.deleted}, skipped: ${result.breakdown.skipped})`;
+        }
+
+        if (result.errors > 0) {
+          message += `. ${result.errors} errors occurred.`;
+        }
+
+        return textResponse(message);
       }
 
       case "reindex-note": {
         const params = ReindexNoteSchema.parse(args);
-        // TODO: Implement single-note reindex
-        return textResponse(`[TODO] Reindex note: "${params.title}"`);
+        await reindexNote(params.title);
+        return textResponse(`Reindexed note: "${params.title}"`);
       }
 
       case "list-notes": {
-        // TODO: Implement count
-        return textResponse(`[TODO] List notes count`);
+        const store = getVectorStore();
+        const count = await store.count();
+        return textResponse(`${count} notes indexed. Run index-notes to update the index.`);
       }
 
       case "get-note": {
         const params = GetNoteSchema.parse(args);
-        // TODO: Implement get
-        return textResponse(`[TODO] Get note: "${params.title}"`);
+        const note = await getNoteByTitle(params.title);
+
+        if (!note) {
+          return errorResponse(`Note not found: "${params.title}"`);
+        }
+
+        return textResponse(JSON.stringify({
+          title: note.title,
+          folder: note.folder,
+          content: note.content,
+          created: note.created,
+          modified: note.modified,
+        }, null, 2));
       }
 
       case "list-folders": {
-        // TODO: Implement folder listing
-        return textResponse(`[TODO] List folders`);
+        const folders = await getAllFolders();
+        return textResponse(JSON.stringify(folders, null, 2));
       }
 
       // Write tools
       case "create-note": {
         const params = CreateNoteSchema.parse(args);
-        // TODO: Implement create
-        return textResponse(`[TODO] Create note: "${params.title}"`);
+        await createNote(params.title, params.content, params.folder);
+        const location = params.folder ? `${params.folder}/${params.title}` : params.title;
+        return textResponse(`Created note: "${location}"`);
       }
 
       case "update-note": {
         const params = UpdateNoteSchema.parse(args);
-        // TODO: Implement update
-        return textResponse(`[TODO] Update note: "${params.title}" (reindex: ${params.reindex})`);
+        await updateNote(params.title, params.content);
+
+        if (params.reindex) {
+          try {
+            await reindexNote(params.title);
+            return textResponse(`Updated and reindexed note: "${params.title}"`);
+          } catch {
+            return textResponse(`Updated note: "${params.title}" (reindexing failed, run index-notes to update)`);
+          }
+        }
+
+        return textResponse(`Updated note: "${params.title}"`);
       }
 
       case "delete-note": {
@@ -287,14 +338,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!params.confirm) {
           return errorResponse("Add confirm: true to delete the note");
         }
-        // TODO: Implement delete
-        return textResponse(`[TODO] Delete note: "${params.title}"`);
+        await deleteNote(params.title);
+        return textResponse(`Deleted note: "${params.title}"`);
       }
 
       case "move-note": {
         const params = MoveNoteSchema.parse(args);
-        // TODO: Implement move
-        return textResponse(`[TODO] Move note: "${params.title}" to "${params.folder}"`);
+        await moveNote(params.title, params.folder);
+        return textResponse(`Moved note: "${params.title}" to folder "${params.folder}"`);
       }
 
       default:
@@ -305,7 +356,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const issues = error.errors.map((e) => `${e.path.join(".")}: ${e.message}`).join(", ");
       return errorResponse(`Invalid arguments: ${issues}`);
     }
-    throw error;
+
+    // Handle other errors gracefully
+    const message = error instanceof Error ? error.message : String(error);
+    debug("Tool error:", error);
+    return errorResponse(message);
   }
 });
 
