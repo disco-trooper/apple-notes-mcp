@@ -278,3 +278,6 @@ export async function searchNotes(
 // Re-export types for convenience
 export type { SearchMode as Mode };
 export type { SearchResult } from "../types/index.js";
+
+// Export utility functions for testing
+export { rrfScore, generatePreview, filterByFolder };
