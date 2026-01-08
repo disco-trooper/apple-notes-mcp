@@ -9,6 +9,7 @@ import "dotenv/config";
 
 // Import constants
 import { DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT } from "./config/constants.js";
+import { validateEnv } from "./config/env.js";
 
 // Import implementations
 import { getVectorStore } from "./db/lancedb.js";
@@ -373,6 +374,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
 // Start server
 async function main() {
+  // Validate environment variables before anything else
+  validateEnv();
+
   debug("Starting apple-notes-mcp server...");
   const transport = new StdioServerTransport();
   await server.connect(transport);
