@@ -201,7 +201,6 @@ export class LanceDBStore implements VectorStore {
 
   async getByTitle(title: string): Promise<NoteRecord | null> {
     const table = await this.ensureTable();
-    if (!table) return null;
 
     const validTitle = validateTitle(title);
     const escapedTitle = escapeForFilter(validTitle);
