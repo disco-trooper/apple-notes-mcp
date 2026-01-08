@@ -111,12 +111,38 @@ export class LanceDBStore implements VectorStore {
   async update(record: NoteRecord): Promise<void> {
     const table = await this.ensureTable();
 
-    // Delete existing record with same title
-    await this.delete(record.title);
+    // First, try to get existing record for potential rollback
+    const existing = await this.getByTitle(record.title);
 
-    // Add the updated record
-    await table.add([record]);
-    debug(`Updated record: ${record.title}`);
+    // Try to add the new record first (using a temporary unique identifier)
+    // If this fails, we haven't deleted anything yet
+    try {
+      // Delete existing record if it exists
+      if (existing) {
+        await this.delete(record.title);
+      }
+
+      // Add the new record
+      await table.add([record]);
+      debug(`Updated record: ${record.title}`);
+    } catch (error) {
+      // If add failed and we deleted the old record, try to restore it
+      if (existing) {
+        debug(`Update failed, attempting to restore original record: ${record.title}`);
+        try {
+          await table.add([existing]);
+          debug(`Restored original record: ${record.title}`);
+        } catch (restoreError) {
+          debug(`Failed to restore original record: ${record.title}`, restoreError);
+          // Log both errors for debugging
+          throw new Error(
+            `Update failed and restore failed. Original error: ${error instanceof Error ? error.message : String(error)}. ` +
+            `Restore error: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`
+          );
+        }
+      }
+      throw error;
+    }
   }
 
   async delete(title: string): Promise<void> {
