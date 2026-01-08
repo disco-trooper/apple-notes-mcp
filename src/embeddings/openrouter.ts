@@ -1,0 +1,243 @@
+/**
+ * OpenRouter Embeddings Client
+ *
+ * Provides embedding generation via OpenRouter API with:
+ * - Configurable model and dimensions via environment variables
+ * - Retry logic with exponential backoff
+ * - Rate limiting handling (429 status)
+ * - Caching for repeated queries
+ * - Input truncation
+ * - Debug logging to stderr
+ */
+
+// Configuration from environment
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || "qwen/qwen3-embedding-8b";
+const EMBEDDING_DIMS = parseInt(process.env.EMBEDDING_DIMS || "4096", 10);
+
+// Constants
+const API_URL = "https://openrouter.ai/api/v1/embeddings";
+const MAX_INPUT_LENGTH = 8000;
+const MAX_RETRIES = 3;
+const CACHE_KEY_LENGTH = 100;
+
+// Debug logging to stderr (never pollute stdout/MCP protocol)
+const DEBUG = process.env.DEBUG === "true";
+function debug(...args: unknown[]): void {
+  if (DEBUG) {
+    console.error("[DEBUG:embeddings]", ...args);
+  }
+}
+
+// Embedding cache to reduce API calls
+// Key: first 100 chars of input text
+// Value: embedding vector
+const embeddingCache = new Map<string, number[]>();
+
+/**
+ * Sleep for a specified duration
+ */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Calculate exponential backoff delay
+ * @param attempt - Current attempt number (0-indexed)
+ * @param baseMs - Base delay in milliseconds
+ * @returns Delay in milliseconds
+ */
+function getBackoffDelay(attempt: number, baseMs: number = 1000): number {
+  return Math.pow(2, attempt) * baseMs;
+}
+
+/**
+ * Generate cache key from input text
+ * Uses first 100 characters for efficiency
+ */
+function getCacheKey(text: string): string {
+  return text.slice(0, CACHE_KEY_LENGTH);
+}
+
+/**
+ * Truncate input text to maximum allowed length
+ */
+function truncateInput(text: string): string {
+  if (text.length <= MAX_INPUT_LENGTH) {
+    return text;
+  }
+  debug(`Truncating input from ${text.length} to ${MAX_INPUT_LENGTH} chars`);
+  return text.substring(0, MAX_INPUT_LENGTH);
+}
+
+/**
+ * OpenRouter API error with additional context
+ */
+class OpenRouterError extends Error {
+  constructor(
+    message: string,
+    public readonly statusCode?: number,
+    public readonly responseBody?: string
+  ) {
+    super(message);
+    this.name = "OpenRouterError";
+  }
+}
+
+/**
+ * Get embedding vector for text using OpenRouter API
+ *
+ * Features:
+ * - Caches results based on first 100 chars of input
+ * - Retries up to 3 times with exponential backoff
+ * - Handles rate limiting (429) with longer delays
+ * - Truncates input to 8000 chars
+ *
+ * @param text - Input text to embed
+ * @returns Promise resolving to embedding vector
+ * @throws OpenRouterError if API call fails after all retries
+ */
+export async function getOpenRouterEmbedding(text: string): Promise<number[]> {
+  // Validate API key
+  if (!OPENROUTER_API_KEY) {
+    throw new OpenRouterError(
+      "OPENROUTER_API_KEY environment variable is not set"
+    );
+  }
+
+  // Check cache first
+  const cacheKey = getCacheKey(text);
+  const cached = embeddingCache.get(cacheKey);
+  if (cached) {
+    debug(`Cache hit for key: "${cacheKey.substring(0, 30)}..."`);
+    return cached;
+  }
+
+  debug(`Cache miss, fetching embedding for: "${cacheKey.substring(0, 30)}..."`);
+
+  // Truncate input to max length
+  const truncatedText = truncateInput(text);
+
+  // Retry loop
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    try {
+      debug(`Attempt ${attempt + 1}/${MAX_RETRIES}`);
+
+      const response = await fetch(API_URL, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+          "Content-Type": "application/json",
+          "HTTP-Referer": "https://github.com/apple-notes-mcp",
+          "X-Title": "Apple Notes MCP",
+        },
+        body: JSON.stringify({
+          model: EMBEDDING_MODEL,
+          input: truncatedText,
+          dimensions: EMBEDDING_DIMS,
+        }),
+      });
+
+      // Handle rate limiting
+      if (response.status === 429) {
+        const waitTime = getBackoffDelay(attempt, 2000); // Longer base delay for rate limits
+        debug(`Rate limited (429), waiting ${waitTime}ms before retry`);
+        await sleep(waitTime);
+        continue;
+      }
+
+      // Handle other errors
+      if (!response.ok) {
+        const errorBody = await response.text();
+        throw new OpenRouterError(
+          `OpenRouter API error: ${response.status} - ${errorBody}`,
+          response.status,
+          errorBody
+        );
+      }
+
+      // Parse response
+      const data = await response.json() as {
+        data?: Array<{ embedding?: number[] }>;
+      };
+
+      // Validate response structure
+      if (!data?.data?.[0]?.embedding) {
+        throw new OpenRouterError(
+          "Invalid API response: missing embedding data",
+          response.status,
+          JSON.stringify(data)
+        );
+      }
+
+      const embedding = data.data[0].embedding;
+
+      // Validate embedding dimensions
+      if (embedding.length !== EMBEDDING_DIMS) {
+        debug(
+          `Warning: Expected ${EMBEDDING_DIMS} dimensions, got ${embedding.length}`
+        );
+      }
+
+      // Cache the result
+      embeddingCache.set(cacheKey, embedding);
+      debug(`Successfully got embedding with ${embedding.length} dimensions`);
+
+      return embedding;
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+
+      // Don't retry on non-retryable errors
+      if (error instanceof OpenRouterError && error.statusCode) {
+        const nonRetryable = [400, 401, 403, 404];
+        if (nonRetryable.includes(error.statusCode)) {
+          debug(`Non-retryable error (${error.statusCode}), failing immediately`);
+          throw error;
+        }
+      }
+
+      // If not the last attempt, wait before retrying
+      if (attempt < MAX_RETRIES - 1) {
+        const waitTime = getBackoffDelay(attempt);
+        debug(`Error: ${lastError.message}, retrying in ${waitTime}ms`);
+        await sleep(waitTime);
+      }
+    }
+  }
+
+  // All retries exhausted
+  throw new OpenRouterError(
+    `Failed to get embedding after ${MAX_RETRIES} attempts: ${lastError?.message}`,
+    undefined,
+    undefined
+  );
+}
+
+/**
+ * Get the configured embedding dimensions
+ *
+ * @returns Number of dimensions for embeddings
+ */
+export function getOpenRouterDimensions(): number {
+  return EMBEDDING_DIMS;
+}
+
+/**
+ * Clear the embedding cache
+ * Useful for testing or memory management
+ */
+export function clearEmbeddingCache(): void {
+  const size = embeddingCache.size;
+  embeddingCache.clear();
+  debug(`Cleared embedding cache (${size} entries)`);
+}
+
+/**
+ * Get current cache size
+ * Useful for monitoring
+ */
+export function getEmbeddingCacheSize(): number {
+  return embeddingCache.size;
+}
