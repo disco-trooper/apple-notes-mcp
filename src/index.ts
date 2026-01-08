@@ -24,9 +24,9 @@ function debug(...args: unknown[]) {
 
 // Tool parameter schemas
 const SearchNotesSchema = z.object({
-  query: z.string(),
+  query: z.string().min(1, "Query cannot be empty"),
   folder: z.string().optional(),
-  limit: z.number().default(20),
+  limit: z.number().min(1).max(100).default(20),
   mode: z.enum(["hybrid", "keyword", "semantic"]).default("hybrid"),
   include_content: z.boolean().default(false),
 });
