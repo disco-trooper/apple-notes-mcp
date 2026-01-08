@@ -269,7 +269,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         if (result.errors > 0) {
-          message += `. ${result.errors} errors occurred.`;
+          message += `\n${result.errors} errors occurred.`;
+          if (result.failedNotes && result.failedNotes.length > 0) {
+            message += `\nFailed notes:\n${result.failedNotes.map(n => `  - ${n}`).join("\n")}`;
+          }
         }
 
         return textResponse(message);

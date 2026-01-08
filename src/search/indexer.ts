@@ -41,6 +41,8 @@ export interface IndexResult {
     deleted: number;
     skipped: number;
   };
+  /** List of notes that failed to index (for debugging) */
+  failedNotes?: string[];
 }
 
 /**
@@ -74,16 +76,19 @@ export async function fullIndex(): Promise<IndexResult> {
 
   const records: NoteRecord[] = [];
   let errors = 0;
+  const failedNotes: string[] = [];
 
   for (let i = 0; i < notes.length; i++) {
     const noteInfo = notes[i];
+    const notePath = `${noteInfo.folder}/${noteInfo.title}`;
     debug(`Processing ${i + 1}/${notes.length}: ${noteInfo.title}`);
 
     try {
       // Get full note content
-      const noteDetails = await getNoteByTitle(`${noteInfo.folder}/${noteInfo.title}`);
+      const noteDetails = await getNoteByTitle(notePath);
       if (!noteDetails) {
         debug(`Could not fetch note: ${noteInfo.title}`);
+        failedNotes.push(notePath);
         errors++;
         continue;
       }
@@ -116,6 +121,7 @@ export async function fullIndex(): Promise<IndexResult> {
       }
     } catch (error) {
       debug(`Error processing ${noteInfo.title}:`, error);
+      failedNotes.push(notePath);
       errors++;
     }
   }
@@ -132,6 +138,7 @@ export async function fullIndex(): Promise<IndexResult> {
     indexed: records.length,
     errors,
     timeMs,
+    failedNotes: failedNotes.length > 0 ? failedNotes : undefined,
   };
 }
 
@@ -208,16 +215,19 @@ export async function incrementalIndex(): Promise<IndexResult> {
   debug(`Incremental: add=${toAdd.length}, update=${toUpdate.length}, delete=${toDelete.length}, skip=${toSkip.length}`);
 
   let errors = 0;
+  const failedNotes: string[] = [];
 
   // Process additions and updates
   const toProcess = [...toAdd, ...toUpdate];
   for (let i = 0; i < toProcess.length; i++) {
     const noteInfo = toProcess[i];
+    const notePath = `${noteInfo.folder}/${noteInfo.title}`;
     debug(`Processing ${i + 1}/${toProcess.length}: ${noteInfo.title}`);
 
     try {
-      const noteDetails = await getNoteByTitle(`${noteInfo.folder}/${noteInfo.title}`);
+      const noteDetails = await getNoteByTitle(notePath);
       if (!noteDetails) {
+        failedNotes.push(notePath);
         errors++;
         continue;
       }
@@ -246,6 +256,7 @@ export async function incrementalIndex(): Promise<IndexResult> {
       }
     } catch (error) {
       debug(`Error processing ${noteInfo.title}:`, error);
+      failedNotes.push(notePath);
       errors++;
     }
   }
@@ -257,6 +268,7 @@ export async function incrementalIndex(): Promise<IndexResult> {
       await store.delete(title);
     } catch (error) {
       debug(`Error deleting ${key}:`, error);
+      failedNotes.push(`DELETE: ${key}`);
       errors++;
     }
   }
@@ -275,6 +287,7 @@ export async function incrementalIndex(): Promise<IndexResult> {
       deleted: toDelete.length,
       skipped: toSkip.length,
     },
+    failedNotes: failedNotes.length > 0 ? failedNotes : undefined,
   };
 }
 
