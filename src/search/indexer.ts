@@ -10,14 +10,19 @@
 import { getEmbedding } from "../embeddings/index.js";
 import { getVectorStore, type NoteRecord } from "../db/lancedb.js";
 import { getAllNotes, getNoteByTitle, type NoteInfo } from "../notes/read.js";
+import { createDebugLogger } from "../utils/debug.js";
+
+/**
+ * Extract note title from folder/title key.
+ * Handles nested folders correctly by taking the last segment.
+ */
+export function extractTitleFromKey(key: string): string {
+  const parts = key.split("/");
+  return parts[parts.length - 1];
+}
 
 // Debug logging
-const DEBUG = process.env.DEBUG === "true";
-function debug(...args: unknown[]) {
-  if (DEBUG) {
-    console.error("[INDEXER]", ...args);
-  }
-}
+const debug = createDebugLogger("INDEX");
 
 // Delay between API calls to avoid rate limiting
 const EMBEDDING_DELAY_MS = 300;
@@ -264,7 +269,7 @@ export async function incrementalIndex(): Promise<IndexResult> {
   // Process deletions
   for (const key of toDelete) {
     try {
-      const [, title] = key.split("/");
+      const title = extractTitleFromKey(key);
       await store.delete(title);
     } catch (error) {
       debug(`Error deleting ${key}:`, error);
