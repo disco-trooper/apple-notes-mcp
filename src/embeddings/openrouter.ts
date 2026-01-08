@@ -183,6 +183,7 @@ export async function getOpenRouterEmbedding(text: string): Promise<number[]> {
 
       // Handle rate limiting
       if (response.status === 429) {
+        clearTimeout(timeoutId); // Clear timeout before sleeping
         const waitTime = getBackoffDelay(attempt, 2000); // Longer base delay for rate limits
         debug(`Rate limited (429), waiting ${waitTime}ms before retry`);
         await sleep(waitTime);
