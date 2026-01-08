@@ -6,8 +6,8 @@
 const MAX_TITLE_LENGTH = 500;
 
 // Pattern for allowed characters in titles
-// Allows: letters (any language), numbers, spaces, common punctuation
-const SAFE_TITLE_PATTERN = /^[\p{L}\p{N}\p{P}\p{Z}]+$/u;
+// Allows: letters (any language), numbers, spaces, explicit safe punctuation only
+const SAFE_TITLE_PATTERN = /^[\p{L}\p{N}\p{Z}.,!?;:_()[\]{}'"@#$%&*+=~-]+$/u;
 
 /**
  * Validate and sanitize a note title for database operations.

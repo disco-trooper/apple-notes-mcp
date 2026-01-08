@@ -24,6 +24,30 @@ describe("validateTitle", () => {
   });
 });
 
+describe("validateTitle - restricted punctuation", () => {
+  it("allows common safe punctuation", () => {
+    expect(validateTitle("Note: My Title")).toBe("Note: My Title");
+    expect(validateTitle("Meeting (2024-01-08)")).toBe("Meeting (2024-01-08)");
+    expect(validateTitle("Q&A Session")).toBe("Q&A Session");
+    expect(validateTitle("To-Do List")).toBe("To-Do List");
+    expect(validateTitle("Notes #1")).toBe("Notes #1");
+    expect(validateTitle("50% Complete!")).toBe("50% Complete!");
+  });
+
+  it("rejects backticks", () => {
+    expect(() => validateTitle("Note `code` here")).toThrow("invalid characters");
+  });
+
+  it("rejects pipe character", () => {
+    expect(() => validateTitle("Option A | Option B")).toThrow("invalid characters");
+  });
+
+  it("rejects angle brackets", () => {
+    expect(() => validateTitle("Note <script>")).toThrow("invalid characters");
+    expect(() => validateTitle("A > B")).toThrow("invalid characters");
+  });
+});
+
 describe("escapeForFilter", () => {
   it("escapes single quotes", () => {
     expect(escapeForFilter("O'Brien")).toBe("O''Brien");
