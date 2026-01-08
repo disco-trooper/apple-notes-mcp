@@ -103,38 +103,40 @@ export class LanceDBStore implements VectorStore {
   async update(record: NoteRecord): Promise<void> {
     const table = await this.ensureTable();
 
-    // First, try to get existing record for potential rollback
-    const existing = await this.getByTitle(record.title);
-
-    // Try to add the new record first (using a temporary unique identifier)
-    // If this fails, we haven't deleted anything yet
+    // Add new record first (LanceDB allows duplicates with same title)
+    // This ensures we never lose data - if add fails, old record still exists
     try {
-      // Delete existing record if it exists
-      if (existing) {
-        await this.delete(record.title);
-      }
-
-      // Add the new record
       await table.add([record]);
-      debug(`Updated record: ${record.title}`);
-    } catch (error) {
-      // If add failed and we deleted the old record, try to restore it
-      if (existing) {
-        debug(`Update failed, attempting to restore original record: ${record.title}`);
-        try {
-          await table.add([existing]);
-          debug(`Restored original record: ${record.title}`);
-        } catch (restoreError) {
-          debug(`Failed to restore original record: ${record.title}`, restoreError);
-          // Log both errors for debugging
-          throw new Error(
-            `Update failed and restore failed. Original error: ${error instanceof Error ? error.message : String(error)}. ` +
-            `Restore error: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`
-          );
+      debug(`Added new version of record: ${record.title}`);
+    } catch (addError) {
+      // If add fails, old record still exists, throw original error
+      throw addError;
+    }
+
+    // Now delete old record(s) - use indexed_at to identify which is old
+    const validTitle = validateTitle(record.title);
+    const escapedTitle = escapeForFilter(validTitle);
+
+    try {
+      // Delete records with same title but different indexed_at (older versions)
+      const allWithTitle = await table
+        .query()
+        .where(`title = '${escapedTitle}'`)
+        .toArray();
+
+      for (const existing of allWithTitle) {
+        if (existing.indexed_at !== record.indexed_at) {
+          const escapedOldIndexedAt = escapeForFilter(existing.indexed_at as string);
+          await table.delete(`title = '${escapedTitle}' AND indexed_at = '${escapedOldIndexedAt}'`);
+          debug(`Deleted old version: ${record.title} (indexed_at: ${existing.indexed_at})`);
         }
       }
-      throw error;
+    } catch (deleteError) {
+      // Log but don't fail - we have the new record, old one is just orphaned
+      debug(`Warning: Failed to delete old record versions for: ${record.title}`, deleteError);
     }
+
+    debug(`Updated record: ${record.title}`);
   }
 
   async delete(title: string): Promise<void> {
