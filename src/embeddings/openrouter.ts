@@ -10,10 +10,12 @@
  * - Debug logging to stderr
  */
 
+import { DEFAULT_OPENROUTER_EMBEDDING_DIMS, DEFAULT_OPENROUTER_MODEL } from "../config/constants.js";
+
 // Configuration from environment
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
-const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || "qwen/qwen3-embedding-8b";
-const EMBEDDING_DIMS = parseInt(process.env.EMBEDDING_DIMS || "4096", 10);
+const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || DEFAULT_OPENROUTER_MODEL;
+const EMBEDDING_DIMS = parseInt(process.env.EMBEDDING_DIMS || String(DEFAULT_OPENROUTER_EMBEDDING_DIMS), 10);
 
 // Constants
 const API_URL = "https://openrouter.ai/api/v1/embeddings";

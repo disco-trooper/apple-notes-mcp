@@ -7,6 +7,9 @@ import {
 import { z } from "zod";
 import "dotenv/config";
 
+// Import constants
+import { DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT } from "./config/constants.js";
+
 // Import implementations
 import { getVectorStore } from "./db/lancedb.js";
 import { getNoteByTitle, getAllFolders } from "./notes/read.js";
@@ -26,7 +29,7 @@ function debug(...args: unknown[]) {
 const SearchNotesSchema = z.object({
   query: z.string().min(1, "Query cannot be empty"),
   folder: z.string().optional(),
-  limit: z.number().min(1).max(100).default(20),
+  limit: z.number().min(1).max(MAX_SEARCH_LIMIT).default(DEFAULT_SEARCH_LIMIT),
   mode: z.enum(["hybrid", "keyword", "semantic"]).default("hybrid"),
   include_content: z.boolean().default(false),
 });

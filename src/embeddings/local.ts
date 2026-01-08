@@ -5,9 +5,10 @@
  * Supports model override via EMBEDDING_MODEL env var.
  */
 
+import { DEFAULT_LOCAL_EMBEDDING_DIMS } from "../config/constants.js";
+
 // Model configuration
 const DEFAULT_MODEL = "Xenova/multilingual-e5-small";
-const DEFAULT_DIMENSIONS = 384;
 
 // Model dimensions lookup (common models)
 const MODEL_DIMENSIONS: Record<string, number> = {
@@ -165,8 +166,8 @@ export function getLocalDimensions(): number {
 
   // If we've already loaded the model and have embeddings, we could cache the actual dimension
   // For now, return default for unknown models
-  debug(`Unknown model "${modelName}", using default dimensions: ${DEFAULT_DIMENSIONS}`);
-  return DEFAULT_DIMENSIONS;
+  debug(`Unknown model "${modelName}", using default dimensions: ${DEFAULT_LOCAL_EMBEDDING_DIMS}`);
+  return DEFAULT_LOCAL_EMBEDDING_DIMS;
 }
 
 /**
