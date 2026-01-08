@@ -1,21 +1,21 @@
 # apple-notes-mcp
 
-MCP server for Apple Notes with semantic search and CRUD operations. Enables Claude to search, read, create, update, and manage your Apple Notes using natural language.
+MCP server for Apple Notes with semantic search and CRUD operations. Claude searches, reads, creates, updates, and manages your Apple Notes through natural language.
 
 ## Features
 
-- **Semantic Search** - Find notes by meaning, not just keywords
-- **Hybrid Search** - Combines vector + keyword search for best results
+- **Semantic Search** - Find notes by meaning, not keywords
+- **Hybrid Search** - Combine vector and keyword search for better results
 - **Full CRUD** - Create, read, update, delete, and move notes
-- **Incremental Indexing** - Only re-embeds changed notes
+- **Incremental Indexing** - Re-embed only changed notes
 - **Dual Embedding Support** - Local HuggingFace or OpenRouter API
-- **Claude Code Integration** - Works seamlessly with Claude Code CLI
+- **Claude Code Integration** - Works with Claude Code CLI
 
 ## Requirements
 
 - macOS (uses Apple Notes via JXA)
 - [Bun](https://bun.sh) runtime
-- Apple Notes app with some notes
+- Apple Notes app with notes
 
 ## Installation
 
@@ -27,22 +27,22 @@ bun install
 
 ## Quick Start
 
-Run the interactive setup wizard:
+Run the setup wizard:
 
 ```bash
 bun run setup
 ```
 
-The wizard will:
-1. Choose embedding provider (local or OpenRouter)
-2. Configure API keys if needed
-3. Set up auto-indexing preferences
-4. Add to Claude Code configuration
-5. Index your notes
+The wizard:
+1. Chooses your embedding provider (local or OpenRouter)
+2. Configures API keys if needed
+3. Sets auto-indexing preferences
+4. Adds to Claude Code configuration
+5. Indexes your notes
 
 ## Configuration
 
-Configuration is stored in `.env` file:
+Store configuration in `.env`:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
@@ -55,9 +55,9 @@ Configuration is stored in `.env` file:
 
 ### Embedding Providers
 
-**Local (default)**: Uses HuggingFace Transformers with `Xenova/multilingual-e5-small`. Free, runs on your machine, ~200MB download.
+**Local (default)**: Uses HuggingFace Transformers with `Xenova/multilingual-e5-small`. Free, runs locally, ~200MB download.
 
-**OpenRouter**: Uses cloud API. Fast, no local resources needed, requires API key. Get one at [openrouter.ai](https://openrouter.ai).
+**OpenRouter**: Uses cloud API. Fast, requires no local resources, needs API key from [openrouter.ai](https://openrouter.ai).
 
 See [docs/models.md](docs/models.md) for model comparison.
 
@@ -66,7 +66,7 @@ See [docs/models.md](docs/models.md) for model comparison.
 ### Search & Discovery
 
 #### `search-notes`
-Search notes using hybrid vector + fulltext search.
+Search notes with hybrid vector + fulltext search.
 
 ```
 query: "meeting notes from last week"
@@ -77,13 +77,13 @@ include_content: false    # include full content vs preview
 ```
 
 #### `list-notes`
-Count how many notes are indexed.
+Count indexed notes.
 
 #### `list-folders`
-List all folders in Apple Notes.
+List all Apple Notes folders.
 
 #### `get-note`
-Get full content of a note by title.
+Get a note's full content by title.
 
 ```
 title: "My Note"          # or "Work/My Note" for disambiguation
@@ -109,7 +109,7 @@ title: "My Note"
 ### CRUD Operations
 
 #### `create-note`
-Create a new note in Apple Notes.
+Create a note in Apple Notes.
 
 ```
 title: "New Note"
@@ -135,7 +135,7 @@ confirm: true             # must be true to delete
 ```
 
 #### `move-note`
-Move a note to a different folder.
+Move a note to another folder.
 
 ```
 title: "My Note"
@@ -170,26 +170,26 @@ After setup, use natural language with Claude:
 
 - "Search my notes for project ideas"
 - "Create a note called 'Meeting Notes' in the Work folder"
-- "What's in my note about the vacation plans?"
+- "What's in my note about vacation plans?"
 - "Move the 'Old Project' note to Archive"
-- "Index my notes" (after adding new notes in Apple Notes app)
+- "Index my notes" (after adding notes in Apple Notes)
 
 ## Troubleshooting
 
 ### "Note not found"
-Use the full path format `Folder/Note Title` when multiple notes have the same name.
+Use full path format `Folder/Note Title` when multiple notes share the same name.
 
 ### Slow first search
-Local embeddings need to download the model on first use (~200MB). Subsequent searches are fast.
+Local embeddings download the model on first use (~200MB). Subsequent searches run fast.
 
 ### "READONLY_MODE is enabled"
-Set `READONLY_MODE=false` in `.env` to allow write operations.
+Set `READONLY_MODE=false` in `.env` to enable write operations.
 
-### Notes not appearing in search
+### Notes missing from search
 Run `index-notes` to update the search index. Use `mode: full` if incremental misses changes.
 
 ### JXA errors
-Ensure Apple Notes app is running and has notes. Grant automation permissions if prompted.
+Ensure Apple Notes runs and contains notes. Grant automation permissions when prompted.
 
 ## Development
 
