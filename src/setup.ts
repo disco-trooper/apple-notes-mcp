@@ -191,15 +191,16 @@ function getConfigSnippet(): string {
 }
 
 /**
- * Run initial indexing
+ * Run indexing with specified mode
  */
-async function runIndexing(): Promise<{ count: number; timeMs: number }> {
+async function runIndexing(mode: "full" | "incremental"): Promise<{ count: number; timeMs: number; skipped?: number }> {
   // Dynamic import to avoid loading embeddings before config is set
   const { indexNotes } = await import("./search/indexer.js");
-  const result = await indexNotes("full");
+  const result = await indexNotes(mode);
   return {
     count: result.indexed,
     timeMs: result.timeMs,
+    skipped: result.breakdown?.skipped,
   };
 }
 
@@ -469,15 +470,32 @@ async function main(): Promise<void> {
   }
 
   if (runIndex) {
-    s.start("Indexing notes (this may take a while for large collections)...");
+    // Ask for indexing mode
+    const indexMode = await p.select({
+      message: "Indexing mode:",
+      options: [
+        { value: "incremental", label: "Incremental", hint: "Only new/changed notes (faster)" },
+        { value: "full", label: "Full", hint: "Reindex everything (slower)" },
+      ],
+      initialValue: "incremental",
+    });
+
+    if (p.isCancel(indexMode)) {
+      p.cancel("Setup cancelled.");
+      process.exit(0);
+    }
+
+    const mode = indexMode as "full" | "incremental";
+    s.start(`${mode === "full" ? "Full" : "Incremental"} indexing (this may take a while)...`);
     try {
       // Reload environment with new config
       const dotenv = await import("dotenv");
       dotenv.config({ path: ENV_FILE });
 
-      const result = await runIndexing();
+      const result = await runIndexing(mode);
+      const skippedInfo = result.skipped ? `, ${result.skipped} unchanged` : "";
       s.stop(
-        `Indexed ${result.count} notes in ${(result.timeMs / 1000).toFixed(1)}s`
+        `Indexed ${result.count} notes in ${(result.timeMs / 1000).toFixed(1)}s${skippedInfo}`
       );
     } catch (error) {
       s.stop("Indexing failed");
