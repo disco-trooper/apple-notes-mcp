@@ -141,18 +141,18 @@ export async function getOpenRouterEmbedding(text: string): Promise<number[]> {
     );
   }
 
-  // Check cache first
-  const cacheKey = getCacheKey(text);
+  // Truncate input first - cache key must match actual embedded text
+  const truncatedText = truncateInput(text);
+
+  // Check cache using truncated text hash
+  const cacheKey = getCacheKey(truncatedText);
   const cached = embeddingCache.get(cacheKey);
   if (cached) {
-    debug(`Cache hit for key: "${cacheKey.substring(0, 30)}..."`);
+    debug(`Cache hit for key: "${cacheKey.substring(0, 16)}..."`);
     return cached;
   }
 
-  debug(`Cache miss, fetching embedding for: "${cacheKey.substring(0, 30)}..."`);
-
-  // Truncate input to max length
-  const truncatedText = truncateInput(text);
+  debug(`Cache miss, fetching embedding for: "${cacheKey.substring(0, 16)}..."`);
 
   // Retry loop
   let lastError: Error | null = null;
