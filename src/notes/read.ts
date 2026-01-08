@@ -282,6 +282,96 @@ export async function getNoteByTitle(
 }
 
 /**
+ * Get a note by explicit folder and title (no "/" parsing).
+ * Use this when you have folder and title separately to avoid
+ * issues with "/" characters in note titles.
+ *
+ * @param folder - The folder name
+ * @param title - The note title (can contain "/" characters)
+ * @returns Note details with content, or null if not found
+ */
+export async function getNoteByFolderAndTitle(
+  folder: string,
+  title: string
+): Promise<NoteDetails | null> {
+  debug(`Getting note: folder="${folder}", title="${title}"`);
+
+  const escapedTitle = JSON.stringify(title);
+  const escapedFolder = JSON.stringify(folder);
+
+  const jxaCode = `
+    const app = Application('Notes');
+    app.includeStandardAdditions = true;
+
+    const targetTitle = ${escapedTitle};
+    const targetFolder = ${escapedFolder};
+
+    let foundNotes = [];
+    const folders = app.folders();
+
+    for (const folder of folders) {
+      const folderName = folder.name();
+
+      // Only look in the specified folder
+      if (folderName !== targetFolder) {
+        continue;
+      }
+
+      const notes = folder.notes.whose({ name: targetTitle });
+
+      for (let i = 0; i < notes.length; i++) {
+        try {
+          const note = notes[i];
+          const props = note.properties();
+          foundNotes.push({
+            id: note.id(),
+            title: props.name || '',
+            folder: folderName,
+            created: props.creationDate ? props.creationDate.toISOString() : '',
+            modified: props.modificationDate ? props.modificationDate.toISOString() : '',
+            htmlContent: note.body()
+          });
+        } catch (e) {
+          // Skip notes that can't be accessed
+        }
+      }
+    }
+
+    return JSON.stringify(foundNotes);
+  `;
+
+  const result = await executeJxa<string>(jxaCode);
+  const notes = JSON.parse(result) as Array<{
+    id: string;
+    title: string;
+    folder: string;
+    created: string;
+    modified: string;
+    htmlContent: string;
+  }>;
+
+  if (notes.length === 0) {
+    debug("Note not found");
+    return null;
+  }
+
+  const note = notes[0];
+  const content = htmlToMarkdown(note.htmlContent);
+
+  debug(`Found note in folder: ${note.folder}`);
+
+  return {
+    id: note.id,
+    title: note.title,
+    folder: note.folder,
+    created: note.created,
+    modified: note.modified,
+    content,
+    htmlContent: note.htmlContent,
+  };
+}
+
+/**
  * Get all folder names from Apple Notes
  *
  * @returns Array of folder names

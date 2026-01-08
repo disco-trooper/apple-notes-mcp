@@ -9,7 +9,7 @@
 
 import { getEmbedding } from "../embeddings/index.js";
 import { getVectorStore, type NoteRecord } from "../db/lancedb.js";
-import { getAllNotes, getNoteByTitle, type NoteInfo } from "../notes/read.js";
+import { getAllNotes, getNoteByFolderAndTitle, getNoteByTitle, type NoteInfo } from "../notes/read.js";
 import { createDebugLogger } from "../utils/debug.js";
 import { truncateForEmbedding } from "../utils/text.js";
 import { EMBEDDING_DELAY_MS } from "../config/constants.js";
@@ -74,15 +74,15 @@ export async function fullIndex(): Promise<IndexResult> {
 
   for (let i = 0; i < notes.length; i++) {
     const noteInfo = notes[i];
-    const notePath = `${noteInfo.folder}/${noteInfo.title}`;
     debug(`Processing ${i + 1}/${notes.length}: ${noteInfo.title}`);
 
     try {
-      // Get full note content
-      const noteDetails = await getNoteByTitle(notePath);
+      // Get full note content using folder and title separately
+      // to handle notes with "/" in their titles
+      const noteDetails = await getNoteByFolderAndTitle(noteInfo.folder, noteInfo.title);
       if (!noteDetails) {
         debug(`Could not fetch note: ${noteInfo.title}`);
-        failedNotes.push(notePath);
+        failedNotes.push(`${noteInfo.folder}/${noteInfo.title}`);
         errors++;
         continue;
       }
@@ -115,7 +115,7 @@ export async function fullIndex(): Promise<IndexResult> {
       }
     } catch (error) {
       debug(`Error processing ${noteInfo.title}:`, error);
-      failedNotes.push(notePath);
+      failedNotes.push(`${noteInfo.folder}/${noteInfo.title}`);
       errors++;
     }
   }
@@ -215,13 +215,13 @@ export async function incrementalIndex(): Promise<IndexResult> {
   const toProcess = [...toAdd, ...toUpdate];
   for (let i = 0; i < toProcess.length; i++) {
     const noteInfo = toProcess[i];
-    const notePath = `${noteInfo.folder}/${noteInfo.title}`;
     debug(`Processing ${i + 1}/${toProcess.length}: ${noteInfo.title}`);
 
     try {
-      const noteDetails = await getNoteByTitle(notePath);
+      // Use folder and title separately to handle "/" in titles
+      const noteDetails = await getNoteByFolderAndTitle(noteInfo.folder, noteInfo.title);
       if (!noteDetails) {
-        failedNotes.push(notePath);
+        failedNotes.push(`${noteInfo.folder}/${noteInfo.title}`);
         errors++;
         continue;
       }
@@ -250,7 +250,7 @@ export async function incrementalIndex(): Promise<IndexResult> {
       }
     } catch (error) {
       debug(`Error processing ${noteInfo.title}:`, error);
-      failedNotes.push(notePath);
+      failedNotes.push(`${noteInfo.folder}/${noteInfo.title}`);
       errors++;
     }
   }
