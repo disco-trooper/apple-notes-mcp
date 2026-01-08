@@ -1,0 +1,42 @@
+{
+  "name": "apple-notes-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for Apple Notes with semantic search and CRUD operations",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "setup": "bun run src/setup.ts",
+    "dev": "bun --watch run src/index.ts",
+    "check": "bun run tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@lancedb/lancedb": "^0.13.0",
+    "@huggingface/transformers": "^3.0.0",
+    "turndown": "^7.2.0",
+    "marked": "^15.0.0",
+    "run-jxa": "^3.0.0",
+    "zod": "^3.24.0",
+    "@clack/prompts": "^0.8.0",
+    "dotenv": "^16.4.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.1.0",
+    "@types/turndown": "^5.0.0",
+    "typescript": "^5.7.0"
+  },
+  "keywords": [
+    "mcp",
+    "apple-notes",
+    "semantic-search",
+    "rag",
+    "claude"
+  ],
+  "author": "disco-trooper",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/disco-trooper/apple-notes-mcp"
+  }
+}
