@@ -22,9 +22,15 @@ vi.mock("../utils/debug.js", () => ({
   createDebugLogger: vi.fn(() => vi.fn()),
 }));
 
+vi.mock("./tables.js", () => ({
+  findTables: vi.fn(),
+  updateTableCell: vi.fn(),
+}));
+
 import { runJxa } from "run-jxa";
-import { checkReadOnly, createNote, updateNote, deleteNote, moveNote } from "./crud.js";
+import { checkReadOnly, createNote, updateNote, deleteNote, moveNote, editTable } from "./crud.js";
 import { resolveNoteTitle } from "./read.js";
+import { findTables, updateTableCell } from "./tables.js";
 
 describe("checkReadOnly", () => {
   const originalEnv = process.env.READONLY_MODE;
@@ -195,5 +201,59 @@ describe("moveNote", () => {
       suggestions: ["Work/Note", "Personal/Note"],
     });
     await expect(moveNote("Note", "Archive")).rejects.toThrow("Suggestions: Work/Note, Personal/Note");
+  });
+});
+
+describe("editTable", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    delete process.env.READONLY_MODE;
+  });
+
+  it("should throw if READONLY_MODE is enabled", async () => {
+    process.env.READONLY_MODE = "true";
+    await expect(editTable("Test", 0, [])).rejects.toThrow("read-only mode");
+  });
+
+  it("should throw if note not found", async () => {
+    vi.mocked(resolveNoteTitle).mockResolvedValueOnce({
+      success: false,
+      error: "Note not found",
+    });
+    await expect(editTable("Missing", 0, [{ row: 0, column: 0, value: "x" }])).rejects.toThrow("Note not found");
+  });
+
+  it("should throw if table index out of bounds", async () => {
+    vi.mocked(resolveNoteTitle).mockResolvedValueOnce({
+      success: true,
+      note: { id: "123", title: "Test", folder: "Work" },
+    });
+    vi.mocked(runJxa).mockResolvedValueOnce(JSON.stringify({ html: "<div>No tables</div>" }));
+    vi.mocked(findTables).mockReturnValueOnce([]);
+
+    await expect(editTable("Test", 0, [{ row: 0, column: 0, value: "x" }]))
+      .rejects.toThrow("Table index 0 out of bounds");
+  });
+
+  it("should update table cells and save", async () => {
+    vi.mocked(resolveNoteTitle).mockResolvedValueOnce({
+      success: true,
+      note: { id: "123", title: "Test", folder: "Work" },
+    });
+    vi.mocked(runJxa)
+      .mockResolvedValueOnce(JSON.stringify({ html: "<div><object><table></table></object></div>" }))
+      .mockResolvedValueOnce("ok");
+    vi.mocked(findTables).mockReturnValueOnce(["<object><table></table></object>"]);
+    vi.mocked(updateTableCell).mockReturnValueOnce("<object><table>updated</table></object>");
+
+    await expect(editTable("Test", 0, [{ row: 1, column: 0, value: "✅ Done" }]))
+      .resolves.toBeUndefined();
+
+    expect(updateTableCell).toHaveBeenCalledWith(
+      "<object><table></table></object>",
+      1,
+      0,
+      "✅ Done"
+    );
   });
 });

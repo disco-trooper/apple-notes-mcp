@@ -9,6 +9,7 @@ import { runJxa } from "run-jxa";
 import { marked } from "marked";
 import { resolveNoteTitle } from "./read.js";
 import { createDebugLogger } from "../utils/debug.js";
+import { findTables, updateTableCell } from "./tables.js";
 
 // Debug logging
 const debug = createDebugLogger("CRUD");
@@ -254,4 +255,79 @@ export async function moveNote(title: string, folder: string): Promise<void> {
   `);
 
   debug(`Note moved: "${title}" -> "${folder}"`);
+}
+
+export interface TableEdit {
+  row: number;
+  column: number;
+  value: string;
+}
+
+/**
+ * Edit cells in a table within a note.
+ *
+ * @param title - Note title (supports folder prefix)
+ * @param tableIndex - Which table to edit (0-based)
+ * @param edits - Array of cell edits to apply
+ */
+export async function editTable(
+  title: string,
+  tableIndex: number,
+  edits: TableEdit[]
+): Promise<void> {
+  checkReadOnly();
+
+  debug(`Editing table ${tableIndex} in note: "${title}"`);
+
+  // Resolve the note
+  const resolved = await resolveNoteTitle(title);
+  if (!resolved.success || !resolved.note) {
+    if (resolved.suggestions && resolved.suggestions.length > 0) {
+      throw new Error(
+        `${resolved.error} Suggestions: ${resolved.suggestions.join(", ")}`
+      );
+    }
+    throw new Error(resolved.error || `Note not found: "${title}"`);
+  }
+
+  // Get current HTML content
+  const escapedNoteId = JSON.stringify(resolved.note.id);
+  const htmlResult = await runJxa(`
+    const app = Application('Notes');
+    const note = app.notes.byId(${escapedNoteId});
+    if (!note.exists()) {
+      throw new Error("Note no longer exists");
+    }
+    return JSON.stringify({ html: note.body() });
+  `);
+
+  const { html } = JSON.parse(htmlResult as string);
+
+  // Find all tables
+  const tables = findTables(html);
+  if (tableIndex >= tables.length) {
+    throw new Error(
+      `Table index ${tableIndex} out of bounds (note has ${tables.length} tables)`
+    );
+  }
+
+  // Apply edits to the target table
+  let updatedTable = tables[tableIndex];
+  for (const edit of edits) {
+    updatedTable = updateTableCell(updatedTable, edit.row, edit.column, edit.value);
+  }
+
+  // Replace the table in the full HTML
+  const updatedHtml = html.replace(tables[tableIndex], updatedTable);
+
+  // Save back to Apple Notes
+  const escapedHtml = JSON.stringify(updatedHtml);
+  await runJxa(`
+    const app = Application('Notes');
+    const note = app.notes.byId(${escapedNoteId});
+    note.body = ${escapedHtml};
+    return "ok";
+  `);
+
+  debug(`Table ${tableIndex} updated in note: "${title}"`);
 }
