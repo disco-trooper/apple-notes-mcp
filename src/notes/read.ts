@@ -8,6 +8,7 @@
 import { runJxa } from "run-jxa";
 import TurndownService from "turndown";
 import { createDebugLogger } from "../utils/debug.js";
+import type { NoteSuggestion } from "../errors/index.js";
 
 // Debug logging
 const debug = createDebugLogger("NOTES");
@@ -74,8 +75,8 @@ export interface ResolvedNote {
   };
   /** Error message if resolution failed */
   error?: string;
-  /** Suggestions when multiple matches found */
-  suggestions?: string[];
+  /** Rich suggestions when multiple matches found (includes ID and created date) */
+  suggestions?: NoteSuggestion[];
 }
 
 // -----------------------------------------------------------------------------
@@ -186,6 +187,13 @@ export async function getNoteByTitle(
 ): Promise<NoteDetails | null> {
   debug(`Getting note by title: ${title}`);
 
+  // Check for id:xxx format for direct ID lookup
+  if (title.startsWith("id:")) {
+    const noteId = title.slice(3);
+    debug(`ID prefix detected, looking up note by ID: ${noteId}`);
+    return getNoteById(noteId);
+  }
+
   // Check for folder/title format
   let targetFolder: string | null = null;
   let targetTitle = title;
@@ -269,6 +277,84 @@ export async function getNoteByTitle(
   const content = htmlToMarkdown(note.htmlContent);
 
   debug(`Found note in folder: ${note.folder}`);
+
+  return {
+    id: note.id,
+    title: note.title,
+    folder: note.folder,
+    created: note.created,
+    modified: note.modified,
+    content,
+    htmlContent: note.htmlContent,
+  };
+}
+
+/**
+ * Get a note by its Apple Notes ID.
+ * Use this for precise access when title-based lookup is ambiguous.
+ *
+ * @param id - The Apple Notes unique identifier
+ * @returns Note details with content, or null if not found
+ */
+export async function getNoteById(id: string): Promise<NoteDetails | null> {
+  debug(`Getting note by ID: ${id}`);
+
+  const escapedId = JSON.stringify(id);
+
+  const jxaCode = `
+    const app = Application('Notes');
+    app.includeStandardAdditions = true;
+
+    const targetId = ${escapedId};
+
+    try {
+      const note = app.notes.byId(targetId);
+      const props = note.properties();
+
+      // Find the folder this note belongs to
+      let folderName = 'Notes';
+      const folders = app.folders();
+      for (const folder of folders) {
+        const notes = folder.notes();
+        for (let i = 0; i < notes.length; i++) {
+          if (notes[i].id() === targetId) {
+            folderName = folder.name();
+            break;
+          }
+        }
+      }
+
+      return JSON.stringify({
+        id: note.id(),
+        title: props.name || '',
+        folder: folderName,
+        created: props.creationDate ? props.creationDate.toISOString() : '',
+        modified: props.modificationDate ? props.modificationDate.toISOString() : '',
+        htmlContent: note.body()
+      });
+    } catch (e) {
+      return JSON.stringify(null);
+    }
+  `;
+
+  const result = await executeJxa<string>(jxaCode);
+  const note = JSON.parse(result) as {
+    id: string;
+    title: string;
+    folder: string;
+    created: string;
+    modified: string;
+    htmlContent: string;
+  } | null;
+
+  if (!note) {
+    debug("Note not found by ID");
+    return null;
+  }
+
+  const content = htmlToMarkdown(note.htmlContent);
+
+  debug(`Found note: ${note.title} in folder: ${note.folder}`);
 
   return {
     id: note.id,
@@ -408,15 +494,37 @@ export async function getAllFolders(): Promise<string[]> {
  * Resolve a note title input to a unique note
  *
  * Handles:
+ * - "id:xxx" format for direct ID lookup
  * - Exact title match
  * - "folder/title" format for disambiguation
  * - Returns suggestions when multiple matches exist
  *
- * @param input - The note title or "folder/title" string
+ * @param input - The note title, "folder/title", or "id:xxx" string
  * @returns Resolution result with success status, note info, or suggestions
  */
 export async function resolveNoteTitle(input: string): Promise<ResolvedNote> {
   debug(`Resolving note title: ${input}`);
+
+  // Check for id:xxx format for direct ID lookup
+  if (input.startsWith("id:")) {
+    const noteId = input.slice(3);
+    debug(`ID prefix detected, looking up note by ID: ${noteId}`);
+    const noteDetails = await getNoteById(noteId);
+    if (!noteDetails) {
+      return {
+        success: false,
+        error: `Note not found with ID: "${noteId}"`,
+      };
+    }
+    return {
+      success: true,
+      note: {
+        id: noteDetails.id,
+        title: noteDetails.title,
+        folder: noteDetails.folder,
+      },
+    };
+  }
 
   // Check for folder/title format
   let targetFolder: string | null = null;
@@ -455,10 +563,12 @@ export async function resolveNoteTitle(input: string): Promise<ResolvedNote> {
       for (let i = 0; i < notes.length; i++) {
         try {
           const note = notes[i];
+          const props = note.properties();
           foundNotes.push({
             id: note.id(),
             title: note.name(),
-            folder: folderName
+            folder: folderName,
+            created: props.creationDate ? props.creationDate.toISOString() : ''
           });
         } catch (e) {
           // Skip notes that can't be accessed
@@ -474,6 +584,7 @@ export async function resolveNoteTitle(input: string): Promise<ResolvedNote> {
     id: string;
     title: string;
     folder: string;
+    created: string;
   }>;
 
   if (notes.length === 0) {
@@ -492,13 +603,18 @@ export async function resolveNoteTitle(input: string): Promise<ResolvedNote> {
     };
   }
 
-  // Multiple matches - return suggestions
-  const suggestions = notes.map((n) => `${n.folder}/${n.title}`);
-  debug(`Multiple matches found: ${suggestions.join(", ")}`);
+  // Multiple matches - return rich suggestions with ID and created date
+  const suggestions: NoteSuggestion[] = notes.map((n) => ({
+    id: n.id,
+    folder: n.folder,
+    title: n.title,
+    created: n.created,
+  }));
+  debug(`Multiple matches found: ${suggestions.map(s => `${s.folder}/${s.title}`).join(", ")}`);
 
   return {
     success: false,
-    error: `Multiple notes found with title "${targetTitle}". Please specify the folder.`,
+    error: `Multiple notes found with title "${targetTitle}". Use ID prefix to specify.`,
     suggestions,
   };
 }

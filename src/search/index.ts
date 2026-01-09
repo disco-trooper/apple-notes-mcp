@@ -254,6 +254,7 @@ export async function searchNotes(
   // Transform to SearchResult format
   const results: SearchResult[] = dbResults.map((r) => {
     const result: SearchResult = {
+      id: r.id,
       title: r.title,
       folder: r.folder,
       preview: generatePreview(r.content),

@@ -7,6 +7,7 @@ import { createDebugLogger } from "../utils/debug.js";
 
 // Schema for stored notes
 export interface NoteRecord {
+  id: string;           // Apple Notes unique identifier
   title: string;
   content: string;
   vector: number[];
@@ -43,6 +44,7 @@ const debug = createDebugLogger("DB");
  */
 function rowToSearchResult(row: Record<string, unknown>, index: number): SearchResult {
   return {
+    id: row.id as string | undefined,
     title: row.title as string,
     folder: row.folder as string,
     content: row.content as string,
@@ -216,6 +218,7 @@ export class LanceDBStore implements VectorStore {
     const results = await table.query().toArray();
 
     return results.map((row) => ({
+      id: (row.id as string) ?? "",
       title: row.title as string,
       content: row.content as string,
       vector: row.vector as number[],

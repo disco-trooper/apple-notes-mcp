@@ -7,6 +7,8 @@
  * Contains the full content of the note.
  */
 export interface DBSearchResult {
+  /** Apple Notes unique identifier */
+  id?: string;
   /** Note title */
   title: string;
   /** Folder containing the note */
@@ -24,6 +26,8 @@ export interface DBSearchResult {
  * Contains a preview instead of full content by default.
  */
 export interface SearchResult {
+  /** Apple Notes unique identifier */
+  id?: string;
   /** Note title */
   title: string;
   /** Folder containing the note */

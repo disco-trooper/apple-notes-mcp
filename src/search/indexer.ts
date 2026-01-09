@@ -97,6 +97,7 @@ export async function fullIndex(): Promise<IndexResult> {
       const vector = await getEmbedding(content);
 
       const record: NoteRecord = {
+        id: noteDetails.id,
         title: noteDetails.title,
         content: noteDetails.content,
         vector,
@@ -233,6 +234,7 @@ export async function incrementalIndex(): Promise<IndexResult> {
       const vector = await getEmbedding(content);
 
       const record: NoteRecord = {
+        id: noteDetails.id,
         title: noteDetails.title,
         content: noteDetails.content,
         vector,
@@ -312,6 +314,7 @@ export async function reindexNote(title: string): Promise<void> {
   const vector = await getEmbedding(content);
 
   const record: NoteRecord = {
+    id: noteDetails.id,
     title: noteDetails.title,
     content: noteDetails.content,
     vector,

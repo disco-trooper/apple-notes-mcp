@@ -20,6 +20,7 @@ describe("LanceDBStore", () => {
   });
 
   const createTestRecord = (title: string): NoteRecord => ({
+    id: `test-id-${title.toLowerCase().replace(/\s+/g, "-")}`,
     title,
     folder: "Test",
     content: `Content of ${title}`,

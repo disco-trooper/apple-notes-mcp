@@ -19,13 +19,25 @@ export class ReadOnlyModeError extends Error {
   }
 }
 
+/**
+ * Rich suggestion for duplicate note disambiguation.
+ */
+export interface NoteSuggestion {
+  id: string;
+  folder: string;
+  title: string;
+  created: string;
+}
+
 export class DuplicateNoteError extends Error {
   readonly title: string;
-  readonly suggestions: string[];
+  readonly suggestions: NoteSuggestion[];
 
-  constructor(title: string, suggestions: string[]) {
-    const suggestionList = suggestions.join(", ");
-    super(`Multiple notes found with title "${title}". Use folder prefix: ${suggestionList}`);
+  constructor(title: string, suggestions: NoteSuggestion[]) {
+    const suggestionList = suggestions
+      .map(s => `id:${s.id} (${s.folder}, created: ${s.created.split("T")[0]})`)
+      .join("\n  - ");
+    super(`Multiple notes found with title "${title}". Use ID prefix:\n  - ${suggestionList}`);
     this.name = "DuplicateNoteError";
     this.title = title;
     this.suggestions = suggestions;

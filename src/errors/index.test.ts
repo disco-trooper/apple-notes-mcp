@@ -29,12 +29,17 @@ describe("Error Classes", () => {
 
   describe("DuplicateNoteError", () => {
     it("should have correct name and suggestions", () => {
-      const suggestions = ["Work/Note", "Personal/Note"];
+      const suggestions = [
+        { id: "id-1", folder: "Work", title: "Note", created: "2026-01-09T10:00:00.000Z" },
+        { id: "id-2", folder: "Personal", title: "Note", created: "2026-01-09T11:00:00.000Z" },
+      ];
       const error = new DuplicateNoteError("Note", suggestions);
       expect(error.name).toBe("DuplicateNoteError");
       expect(error.title).toBe("Note");
       expect(error.suggestions).toEqual(suggestions);
       expect(error.message).toContain("Multiple notes found");
+      expect(error.message).toContain("id:id-1");
+      expect(error.message).toContain("id:id-2");
     });
   });
 

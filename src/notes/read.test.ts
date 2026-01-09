@@ -118,14 +118,16 @@ describe("resolveNoteTitle", () => {
 
   it("should return suggestions when multiple matches", async () => {
     const mockNotes = [
-      { id: "123", title: "Note", folder: "Work" },
-      { id: "456", title: "Note", folder: "Personal" },
+      { id: "123", title: "Note", folder: "Work", created: "2026-01-09T10:00:00.000Z" },
+      { id: "456", title: "Note", folder: "Personal", created: "2026-01-09T11:00:00.000Z" },
     ];
     vi.mocked(runJxa).mockResolvedValueOnce(JSON.stringify(mockNotes));
 
     const result = await resolveNoteTitle("Note");
     expect(result.success).toBe(false);
     expect(result.suggestions).toHaveLength(2);
-    expect(result.suggestions).toContain("Work/Note");
+    expect(result.suggestions?.[0].id).toBe("123");
+    expect(result.suggestions?.[0].folder).toBe("Work");
+    expect(result.suggestions?.[1].id).toBe("456");
   });
 });
