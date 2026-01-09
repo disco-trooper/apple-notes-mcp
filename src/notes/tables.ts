@@ -66,6 +66,54 @@ export function parseTable(html: string): TableData {
 }
 
 /**
+ * Find the HTML of a specific row in a table.
+ */
+function findRowHtml(tableHtml: string, rowIndex: number): { match: RegExpMatchArray; content: string } | null {
+  const rowRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+  let currentRow = 0;
+  let rowMatch;
+
+  while ((rowMatch = rowRegex.exec(tableHtml)) !== null) {
+    if (currentRow === rowIndex) {
+      return { match: rowMatch, content: rowMatch[1] };
+    }
+    currentRow++;
+  }
+  return null;
+}
+
+/**
+ * Update a specific cell within a row's HTML.
+ */
+function updateCellInRow(rowContent: string, columnIndex: number, value: string, isBold: boolean): string {
+  const cellRegex = /(<td[^>]*>[\s\S]*?<div[^>]*>)([\s\S]*?)(<\/div>[\s\S]*?<\/td>)/gi;
+  let currentCol = 0;
+  let result = rowContent;
+  let cellMatch;
+
+  const replacements: Array<{original: string; replacement: string}> = [];
+
+  while ((cellMatch = cellRegex.exec(rowContent)) !== null) {
+    if (currentCol === columnIndex) {
+      const prefix = cellMatch[1];
+      const suffix = cellMatch[3];
+      const newContent = isBold ? `<b>${value}</b>` : value;
+      replacements.push({
+        original: cellMatch[0],
+        replacement: `${prefix}${newContent}${suffix}`
+      });
+    }
+    currentCol++;
+  }
+
+  for (const r of replacements) {
+    result = result.replace(r.original, r.replacement);
+  }
+
+  return result;
+}
+
+/**
  * Update a specific cell in an Apple Notes table HTML.
  *
  * @param html - The table HTML
@@ -85,48 +133,15 @@ export function updateTableCell(html: string, row: number, column: number, value
     throw new Error(`Column ${column} out of bounds (row has ${parsed.rows[row].length} columns)`);
   }
 
-  // Find and replace the specific cell
-  let currentRow = 0;
-  let result = html;
-
-  const rowRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
-  let rowMatch;
-
-  while ((rowMatch = rowRegex.exec(html)) !== null) {
-    if (currentRow === row) {
-      const rowContent = rowMatch[1];
-      let currentCol = 0;
-      let newRowContent = rowContent;
-
-      const cellRegex = /(<td[^>]*>[\s\S]*?<div[^>]*>)([\s\S]*?)(<\/div>[\s\S]*?<\/td>)/gi;
-      let cellMatch;
-      const replacements: Array<{original: string; replacement: string}> = [];
-
-      while ((cellMatch = cellRegex.exec(rowContent)) !== null) {
-        if (currentCol === column) {
-          const prefix = cellMatch[1];
-          const suffix = cellMatch[3];
-          const isBold = parsed.formatting[row][column].bold;
-          const newContent = isBold ? `<b>${value}</b>` : value;
-          replacements.push({
-            original: cellMatch[0],
-            replacement: `${prefix}${newContent}${suffix}`
-          });
-        }
-        currentCol++;
-      }
-
-      for (const r of replacements) {
-        newRowContent = newRowContent.replace(r.original, r.replacement);
-      }
-
-      result = result.replace(rowMatch[0], `<tr>${newRowContent}</tr>`);
-      break;
-    }
-    currentRow++;
+  const rowData = findRowHtml(html, row);
+  if (!rowData) {
+    throw new Error(`Could not find row ${row} in table HTML`);
   }
 
-  return result;
+  const isBold = parsed.formatting[row][column].bold;
+  const updatedRowContent = updateCellInRow(rowData.content, column, value, isBold);
+
+  return html.replace(rowData.match[0], `<tr>${updatedRowContent}</tr>`);
 }
 
 /**
