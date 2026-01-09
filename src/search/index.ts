@@ -160,15 +160,16 @@ async function hybridSearch(
   const contentMap = new Map<string, DBSearchResult>();
 
   // Process vector search results
+  // Use id as key to avoid collisions with duplicate titles in different folders
   vectorResults.forEach((item, rank) => {
-    const key = item.title;
+    const key = item.id ?? item.title;
     scoreMap.set(key, (scoreMap.get(key) || 0) + rrfScore(rank));
     contentMap.set(key, item);
   });
 
   // Process FTS results
   ftsResults.forEach((item, rank) => {
-    const key = item.title;
+    const key = item.id ?? item.title;
     scoreMap.set(key, (scoreMap.get(key) || 0) + rrfScore(rank));
     if (!contentMap.has(key)) {
       contentMap.set(key, item);

@@ -13,6 +13,7 @@ import { getAllNotes, getNoteByFolderAndTitle, getNoteByTitle, type NoteInfo } f
 import { createDebugLogger } from "../utils/debug.js";
 import { truncateForEmbedding } from "../utils/text.js";
 import { EMBEDDING_DELAY_MS } from "../config/constants.js";
+import { NoteNotFoundError } from "../errors/index.js";
 
 /**
  * Extract note title from folder/title key.
@@ -303,7 +304,7 @@ export async function reindexNote(title: string): Promise<void> {
 
   const noteDetails = await getNoteByTitle(title);
   if (!noteDetails) {
-    throw new Error(`Note not found: "${title}"`);
+    throw new NoteNotFoundError(title);
   }
 
   if (!noteDetails.content.trim()) {
@@ -326,6 +327,10 @@ export async function reindexNote(title: string): Promise<void> {
 
   const store = getVectorStore();
   await store.update(record);
+
+  // Rebuild FTS index after single note update
+  debug("Rebuilding FTS index after single note reindex");
+  await store.rebuildFtsIndex();
 
   debug(`Reindexed: ${title}`);
 }

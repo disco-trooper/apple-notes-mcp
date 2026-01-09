@@ -5,6 +5,7 @@ import {
   ReadOnlyModeError,
   DuplicateNoteError,
   FolderNotFoundError,
+  TableOutOfBoundsError,
 } from "./index.js";
 
 describe("Error Classes", () => {
@@ -49,6 +50,15 @@ describe("Error Classes", () => {
       expect(error.name).toBe("FolderNotFoundError");
       expect(error.folder).toBe("Work");
       expect(error.message).toBe('Folder not found: "Work"');
+    });
+  });
+
+  describe("TableOutOfBoundsError", () => {
+    it("should have correct name and message", () => {
+      const error = new TableOutOfBoundsError("Row 5 out of bounds (table has 3 rows)");
+      expect(error.name).toBe("TableOutOfBoundsError");
+      expect(error.message).toBe("Row 5 out of bounds (table has 3 rows)");
+      expect(error instanceof Error).toBe(true);
     });
   });
 });

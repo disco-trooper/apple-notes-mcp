@@ -83,6 +83,17 @@ function findRowHtml(tableHtml: string, rowIndex: number): { match: RegExpMatchA
 }
 
 /**
+ * Escape HTML special characters to prevent injection.
+ */
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+/**
  * Update a specific cell within a row's HTML.
  */
 function updateCellInRow(rowContent: string, columnIndex: number, value: string, isBold: boolean): string {
@@ -93,11 +104,14 @@ function updateCellInRow(rowContent: string, columnIndex: number, value: string,
 
   const replacements: Array<{original: string; replacement: string}> = [];
 
+  // Escape HTML to prevent injection
+  const escapedValue = escapeHtml(value);
+
   while ((cellMatch = cellRegex.exec(rowContent)) !== null) {
     if (currentCol === columnIndex) {
       const prefix = cellMatch[1];
       const suffix = cellMatch[3];
-      const newContent = isBold ? `<b>${value}</b>` : value;
+      const newContent = isBold ? `<b>${escapedValue}</b>` : escapedValue;
       replacements.push({
         original: cellMatch[0],
         replacement: `${prefix}${newContent}${suffix}`

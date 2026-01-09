@@ -130,4 +130,57 @@ describe("resolveNoteTitle", () => {
     expect(result.suggestions?.[0].folder).toBe("Work");
     expect(result.suggestions?.[1].id).toBe("456");
   });
+
+  it("should resolve note by ID prefix", async () => {
+    const mockNote = {
+      id: "x-coredata://123",
+      title: "ID Note",
+      folder: "Work",
+      created: "2026-01-09T10:00:00.000Z",
+      modified: "2026-01-09T11:00:00.000Z",
+      htmlContent: "<p>Content</p>",
+    };
+    vi.mocked(runJxa).mockResolvedValueOnce(JSON.stringify(mockNote));
+
+    const result = await resolveNoteTitle("id:x-coredata://123");
+    expect(result.success).toBe(true);
+    expect(result.note?.id).toBe("x-coredata://123");
+  });
+
+  it("should return error for invalid ID", async () => {
+    vi.mocked(runJxa).mockResolvedValueOnce("null");
+
+    const result = await resolveNoteTitle("id:invalid-id");
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("not found");
+  });
+});
+
+describe("getNoteByTitle with ID prefix", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("should route id: prefix to ID lookup", async () => {
+    const mockNote = {
+      id: "x-coredata://abc",
+      title: "My Note",
+      folder: "Work",
+      created: "2026-01-09T10:00:00.000Z",
+      modified: "2026-01-09T11:00:00.000Z",
+      htmlContent: "<p>Hello</p>",
+    };
+    vi.mocked(runJxa).mockResolvedValueOnce(JSON.stringify(mockNote));
+
+    const note = await getNoteByTitle("id:x-coredata://abc");
+    expect(note).not.toBeNull();
+    expect(note?.id).toBe("x-coredata://abc");
+  });
+
+  it("should return null for non-existent ID", async () => {
+    vi.mocked(runJxa).mockResolvedValueOnce("null");
+
+    const note = await getNoteByTitle("id:nonexistent");
+    expect(note).toBeNull();
+  });
 });
