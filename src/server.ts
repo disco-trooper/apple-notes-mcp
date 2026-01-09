@@ -18,7 +18,7 @@ import { validateEnv } from "./config/env.js";
 // Import implementations
 import { getVectorStore } from "./db/lancedb.js";
 import { getNoteByTitle, getAllFolders } from "./notes/read.js";
-import { createNote, updateNote, deleteNote, moveNote } from "./notes/crud.js";
+import { createNote, updateNote, deleteNote, moveNote, editTable } from "./notes/crud.js";
 import { searchNotes } from "./search/index.js";
 import { indexNotes, reindexNote } from "./search/indexer.js";
 
@@ -70,6 +70,16 @@ const DeleteNoteSchema = z.object({
 const MoveNoteSchema = z.object({
   title: z.string(),
   folder: z.string(),
+});
+
+const EditTableSchema = z.object({
+  title: z.string(),
+  table_index: z.number().min(0).default(0),
+  edits: z.array(z.object({
+    row: z.number().min(0),
+    column: z.number().min(0),
+    value: z.string(),
+  })).min(1),
 });
 
 // Helper to create text responses
@@ -245,6 +255,31 @@ export default function createServer() {
             required: ["title", "folder"],
           },
         },
+        {
+          name: "edit-table",
+          description: "Edit cells in a table within a note. Use for updating table data without rewriting the entire note.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              title: { type: "string", description: "Note title (use folder/title for disambiguation)" },
+              table_index: { type: "number", description: "Which table to edit (0 = first table, default: 0)" },
+              edits: {
+                type: "array",
+                description: "Array of cell edits",
+                items: {
+                  type: "object",
+                  properties: {
+                    row: { type: "number", description: "Row index (0 = header row)" },
+                    column: { type: "number", description: "Column index (0 = first column)" },
+                    value: { type: "string", description: "New cell value" },
+                  },
+                  required: ["row", "column", "value"],
+                },
+              },
+            },
+            required: ["title", "edits"],
+          },
+        },
       ],
     };
   });
@@ -365,6 +400,12 @@ export default function createServer() {
           const params = MoveNoteSchema.parse(args);
           await moveNote(params.title, params.folder);
           return textResponse(`Moved note: "${params.title}" to folder "${params.folder}"`);
+        }
+
+        case "edit-table": {
+          const params = EditTableSchema.parse(args);
+          await editTable(params.title, params.table_index, params.edits);
+          return textResponse(`Updated ${params.edits.length} cell(s) in table ${params.table_index}`);
         }
 
         default:
