@@ -31,7 +31,6 @@ type FeatureExtractionPipeline = (
 
 let pipelineInstance: FeatureExtractionPipeline | null = null;
 let pipelinePromise: Promise<FeatureExtractionPipeline> | null = null;
-let resolvedModel: string | null = null;
 
 /**
  * Get the configured model name.
@@ -82,8 +81,6 @@ async function getPipeline(): Promise<FeatureExtractionPipeline> {
       debug(`Model loaded in ${loadTime}ms`);
 
       pipelineInstance = pipe;
-      resolvedModel = modelName;
-
       return pipe;
     } catch (error) {
       // Reset promise so next call retries
@@ -180,12 +177,4 @@ export function getLocalModelName(): string {
  */
 export function isModelLoaded(): boolean {
   return pipelineInstance !== null;
-}
-
-/**
- * Get the name of the actually loaded model.
- * Returns null if no model has been loaded yet.
- */
-export function getLoadedModelName(): string | null {
-  return resolvedModel;
 }

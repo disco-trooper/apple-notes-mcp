@@ -10,8 +10,6 @@ const COLORS = {
   dim: "\x1b[2m",
   cyan: "\x1b[36m",
   yellow: "\x1b[33m",
-  red: "\x1b[31m",
-  green: "\x1b[32m",
 } as const;
 
 /**

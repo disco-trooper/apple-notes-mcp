@@ -13,14 +13,14 @@ import { getAllNotes, getNoteByFolderAndTitle, getNoteByTitle, type NoteInfo } f
 import { createDebugLogger } from "../utils/debug.js";
 import { truncateForEmbedding } from "../utils/text.js";
 import { EMBEDDING_DELAY_MS } from "../config/constants.js";
+import { NoteNotFoundError } from "../errors/index.js";
 
 /**
  * Extract note title from folder/title key.
  * Handles nested folders correctly by taking the last segment.
  */
 export function extractTitleFromKey(key: string): string {
-  const parts = key.split("/");
-  return parts[parts.length - 1];
+  return key.split("/").at(-1) ?? key;
 }
 
 // Debug logging
@@ -98,6 +98,7 @@ export async function fullIndex(): Promise<IndexResult> {
       const vector = await getEmbedding(content);
 
       const record: NoteRecord = {
+        id: noteDetails.id,
         title: noteDetails.title,
         content: noteDetails.content,
         vector,
@@ -234,6 +235,7 @@ export async function incrementalIndex(): Promise<IndexResult> {
       const vector = await getEmbedding(content);
 
       const record: NoteRecord = {
+        id: noteDetails.id,
         title: noteDetails.title,
         content: noteDetails.content,
         vector,
@@ -270,6 +272,12 @@ export async function incrementalIndex(): Promise<IndexResult> {
     }
   }
 
+  // Rebuild FTS index if any changes were made
+  if (toAdd.length > 0 || toUpdate.length > 0 || toDelete.length > 0) {
+    debug("Rebuilding FTS index after incremental changes");
+    await store.rebuildFtsIndex();
+  }
+
   const timeMs = Date.now() - startTime;
   debug(`Incremental index complete: ${timeMs}ms`);
 
@@ -296,7 +304,7 @@ export async function reindexNote(title: string): Promise<void> {
 
   const noteDetails = await getNoteByTitle(title);
   if (!noteDetails) {
-    throw new Error(`Note not found: "${title}"`);
+    throw new NoteNotFoundError(title);
   }
 
   if (!noteDetails.content.trim()) {
@@ -307,6 +315,7 @@ export async function reindexNote(title: string): Promise<void> {
   const vector = await getEmbedding(content);
 
   const record: NoteRecord = {
+    id: noteDetails.id,
     title: noteDetails.title,
     content: noteDetails.content,
     vector,
@@ -318,6 +327,10 @@ export async function reindexNote(title: string): Promise<void> {
 
   const store = getVectorStore();
   await store.update(record);
+
+  // Rebuild FTS index after single note update
+  debug("Rebuilding FTS index after single note reindex");
+  await store.rebuildFtsIndex();
 
   debug(`Reindexed: ${title}`);
 }

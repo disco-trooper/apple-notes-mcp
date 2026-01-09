@@ -7,6 +7,7 @@ import { createDebugLogger } from "../utils/debug.js";
 
 // Schema for stored notes
 export interface NoteRecord {
+  id: string;           // Apple Notes unique identifier
   title: string;
   content: string;
   vector: number[];
@@ -32,10 +33,25 @@ export interface VectorStore {
   getAll(): Promise<NoteRecord[]>;
   count(): Promise<number>;
   clear(): Promise<void>;
+  rebuildFtsIndex(): Promise<void>;
 }
 
 // Debug logging
 const debug = createDebugLogger("DB");
+
+/**
+ * Convert a database row to a SearchResult with rank-based score.
+ */
+function rowToSearchResult(row: Record<string, unknown>, index: number): SearchResult {
+  return {
+    id: row.id as string | undefined,
+    title: row.title as string,
+    folder: row.folder as string,
+    content: row.content as string,
+    modified: row.modified as string,
+    score: 1 / (1 + index),
+  };
+}
 
 // LanceDB implementation
 export class LanceDBStore implements VectorStore {
@@ -83,8 +99,8 @@ export class LanceDBStore implements VectorStore {
     try {
       await db.dropTable(this.tableName);
       debug(`Dropped existing table: ${this.tableName}`);
-    } catch {
-      // Table didn't exist, that's fine
+    } catch (error) {
+      debug("Table drop skipped (table may not exist):", error);
     }
 
     // Create new table with records
@@ -106,13 +122,8 @@ export class LanceDBStore implements VectorStore {
 
     // Add new record first (LanceDB allows duplicates with same title)
     // This ensures we never lose data - if add fails, old record still exists
-    try {
-      await table.add([record]);
-      debug(`Added new version of record: ${record.title}`);
-    } catch (addError) {
-      // If add fails, old record still exists, throw original error
-      throw addError;
-    }
+    await table.add([record]);
+    debug(`Added new version of record: ${record.title}`);
 
     // Now delete old record(s) - use indexed_at to identify which is old
     const validTitle = validateTitle(record.title);
@@ -165,35 +176,21 @@ export class LanceDBStore implements VectorStore {
       .limit(limit)
       .toArray();
 
-    return results.map((row, index) => ({
-      title: row.title as string,
-      folder: row.folder as string,
-      content: row.content as string,
-      modified: row.modified as string,
-      score: 1 / (1 + index), // Simple rank-based score
-    }));
+    return results.map(rowToSearchResult);
   }
 
   async searchFTS(query: string, limit: number): Promise<SearchResult[]> {
     const table = await this.ensureTable();
 
     try {
-      // LanceDB FTS search - use queryType option
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const results = await (table as any)
-        .search(query, { queryType: "fts" })
+      const results = await table
+        .query()
+        .fullTextSearch(query)
         .limit(limit)
         .toArray();
 
-      return results.map((row: Record<string, unknown>, index: number) => ({
-        title: row.title as string,
-        folder: row.folder as string,
-        content: row.content as string,
-        modified: row.modified as string,
-        score: 1 / (1 + index),
-      }));
+      return results.map(rowToSearchResult);
     } catch (error) {
-      // FTS might fail if no index or no matches
       debug("FTS search failed, returning empty results. Error:", error);
       return [];
     }
@@ -221,6 +218,7 @@ export class LanceDBStore implements VectorStore {
     const results = await table.query().toArray();
 
     return results.map((row) => ({
+      id: (row.id as string) ?? "",
       title: row.title as string,
       content: row.content as string,
       vector: row.vector as number[],
@@ -235,7 +233,8 @@ export class LanceDBStore implements VectorStore {
     try {
       const table = await this.ensureTable();
       return await table.countRows();
-    } catch {
+    } catch (error) {
+      debug("Count failed (table may not exist):", error);
       return 0;
     }
   }
@@ -246,9 +245,19 @@ export class LanceDBStore implements VectorStore {
       await db.dropTable(this.tableName);
       this.table = null;
       debug("Cleared table");
-    } catch {
-      // Table didn't exist
+    } catch (error) {
+      debug("Clear skipped (table may not exist):", error);
     }
+  }
+
+  async rebuildFtsIndex(): Promise<void> {
+    const table = await this.ensureTable();
+    debug("Rebuilding FTS index on content");
+    await table.createIndex("content", {
+      config: lancedb.Index.fts(),
+      replace: true,
+    });
+    debug("FTS index rebuilt");
   }
 }
 

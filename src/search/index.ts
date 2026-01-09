@@ -37,9 +37,6 @@ export interface SearchOptions {
   include_content?: boolean;
 }
 
-// SearchResult is imported from ../types/index.js
-// RRF_K is imported from ../config/constants.js
-
 /**
  * Calculate RRF score for a result at a given rank.
  * Formula: 1 / (k + rank)
@@ -163,15 +160,16 @@ async function hybridSearch(
   const contentMap = new Map<string, DBSearchResult>();
 
   // Process vector search results
+  // Use id as key to avoid collisions with duplicate titles in different folders
   vectorResults.forEach((item, rank) => {
-    const key = item.title;
+    const key = item.id ?? item.title;
     scoreMap.set(key, (scoreMap.get(key) || 0) + rrfScore(rank));
     contentMap.set(key, item);
   });
 
   // Process FTS results
   ftsResults.forEach((item, rank) => {
-    const key = item.title;
+    const key = item.id ?? item.title;
     scoreMap.set(key, (scoreMap.get(key) || 0) + rrfScore(rank));
     if (!contentMap.has(key)) {
       contentMap.set(key, item);
@@ -257,6 +255,7 @@ export async function searchNotes(
   // Transform to SearchResult format
   const results: SearchResult[] = dbResults.map((r) => {
     const result: SearchResult = {
+      id: r.id,
       title: r.title,
       folder: r.folder,
       preview: generatePreview(r.content),
@@ -276,7 +275,6 @@ export async function searchNotes(
 }
 
 // Re-export types for convenience
-export type { SearchMode as Mode };
 export type { SearchResult } from "../types/index.js";
 
 // Export utility functions for testing

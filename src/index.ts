@@ -8,13 +8,18 @@ import { z } from "zod";
 import "dotenv/config";
 
 // Import constants
-import { DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT } from "./config/constants.js";
+import {
+  DEFAULT_SEARCH_LIMIT,
+  MAX_SEARCH_LIMIT,
+  MAX_INPUT_LENGTH,
+  MAX_TITLE_LENGTH
+} from "./config/constants.js";
 import { validateEnv } from "./config/env.js";
 
 // Import implementations
 import { getVectorStore } from "./db/lancedb.js";
 import { getNoteByTitle, getAllFolders } from "./notes/read.js";
-import { createNote, updateNote, deleteNote, moveNote } from "./notes/crud.js";
+import { createNote, updateNote, deleteNote, moveNote, editTable } from "./notes/crud.js";
 import { searchNotes } from "./search/index.js";
 import { indexNotes, reindexNote } from "./search/indexer.js";
 
@@ -25,8 +30,8 @@ const debug = createDebugLogger("MCP");
 
 // Tool parameter schemas
 const SearchNotesSchema = z.object({
-  query: z.string().min(1, "Query cannot be empty"),
-  folder: z.string().optional(),
+  query: z.string().min(1, "Query cannot be empty").max(MAX_INPUT_LENGTH),
+  folder: z.string().max(200).optional(),
   limit: z.number().min(1).max(MAX_SEARCH_LIMIT).default(DEFAULT_SEARCH_LIMIT),
   mode: z.enum(["hybrid", "keyword", "semantic"]).default("hybrid"),
   include_content: z.boolean().default(false),
@@ -38,33 +43,43 @@ const IndexNotesSchema = z.object({
 });
 
 const ReindexNoteSchema = z.object({
-  title: z.string(),
+  title: z.string().min(1).max(MAX_TITLE_LENGTH),
 });
 
 const GetNoteSchema = z.object({
-  title: z.string(),
+  title: z.string().min(1).max(MAX_TITLE_LENGTH),
 });
 
 const CreateNoteSchema = z.object({
-  title: z.string(),
-  content: z.string(),
-  folder: z.string().optional(),
+  title: z.string().min(1).max(MAX_TITLE_LENGTH),
+  content: z.string().min(1).max(MAX_INPUT_LENGTH),
+  folder: z.string().max(200).optional(),
 });
 
 const UpdateNoteSchema = z.object({
-  title: z.string(),
-  content: z.string(),
+  title: z.string().min(1).max(MAX_TITLE_LENGTH),
+  content: z.string().min(1).max(MAX_INPUT_LENGTH),
   reindex: z.boolean().default(true),
 });
 
 const DeleteNoteSchema = z.object({
-  title: z.string(),
+  title: z.string().min(1).max(MAX_TITLE_LENGTH),
   confirm: z.boolean(),
 });
 
 const MoveNoteSchema = z.object({
-  title: z.string(),
-  folder: z.string(),
+  title: z.string().min(1).max(MAX_TITLE_LENGTH),
+  folder: z.string().min(1).max(200),
+});
+
+const EditTableSchema = z.object({
+  title: z.string().min(1).max(MAX_TITLE_LENGTH),
+  table_index: z.number().min(0).default(0),
+  edits: z.array(z.object({
+    row: z.number().min(0),
+    column: z.number().min(0),
+    value: z.string().max(10000),
+  })).min(1).max(100),
 });
 
 // Create MCP server
@@ -231,6 +246,31 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ["title", "folder"],
         },
       },
+      {
+        name: "edit-table",
+        description: "Edit cells in a table within a note. Use for updating table data without rewriting the entire note.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            title: { type: "string", description: "Note title (use folder/title for disambiguation)" },
+            table_index: { type: "number", description: "Which table to edit (0 = first table, default: 0)" },
+            edits: {
+              type: "array",
+              description: "Array of cell edits",
+              items: {
+                type: "object",
+                properties: {
+                  row: { type: "number", description: "Row index (0 = header row)" },
+                  column: { type: "number", description: "Column index (0 = first column)" },
+                  value: { type: "string", description: "New cell value" },
+                },
+                required: ["row", "column", "value"],
+              },
+            },
+          },
+          required: ["title", "edits"],
+        },
+      },
     ],
   };
 });
@@ -351,6 +391,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const params = MoveNoteSchema.parse(args);
         await moveNote(params.title, params.folder);
         return textResponse(`Moved note: "${params.title}" to folder "${params.folder}"`);
+      }
+
+      case "edit-table": {
+        const params = EditTableSchema.parse(args);
+        await editTable(params.title, params.table_index, params.edits);
+        return textResponse(`Updated ${params.edits.length} cell(s) in table ${params.table_index}`);
       }
 
       default:

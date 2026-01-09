@@ -10,6 +10,7 @@ import { marked } from "marked";
 import { resolveNoteTitle } from "./read.js";
 import { createDebugLogger } from "../utils/debug.js";
 import { findTables, updateTableCell } from "./tables.js";
+import { ReadOnlyModeError, NoteNotFoundError, DuplicateNoteError } from "../errors/index.js";
 
 // Debug logging
 const debug = createDebugLogger("CRUD");
@@ -22,25 +23,40 @@ const debug = createDebugLogger("CRUD");
  */
 export function checkReadOnly(): void {
   if (process.env.READONLY_MODE === "true") {
-    throw new Error("Operation disabled in read-only mode");
+    throw new ReadOnlyModeError();
   }
 }
 
 /**
- * Convert Markdown content to HTML for Apple Notes.
+ * Resolve note title and throw if not found.
+ * Consolidates the repeated error handling pattern.
  *
- * @param markdown - Markdown content
- * @returns HTML string
+ * @param title - Note title (supports folder prefix)
+ * @returns The resolved note with id, title, and folder
+ * @throws Error if note not found or duplicates exist without folder prefix
+ */
+async function resolveNoteOrThrow(title: string): Promise<{ id: string; title: string; folder: string }> {
+  const resolved = await resolveNoteTitle(title);
+
+  if (!resolved.success || !resolved.note) {
+    if (resolved.suggestions && resolved.suggestions.length > 0) {
+      throw new DuplicateNoteError(title, resolved.suggestions);
+    }
+    throw new NoteNotFoundError(title);
+  }
+
+  return resolved.note;
+}
+
+/**
+ * Convert Markdown content to HTML for Apple Notes.
  */
 function markdownToHtml(markdown: string): string {
-  // Configure marked for clean HTML output
-  const html = marked.parse(markdown, {
+  return marked.parse(markdown, {
     async: false,
     gfm: true,
     breaks: true,
   }) as string;
-
-  return html;
 }
 
 /**
@@ -112,21 +128,11 @@ export async function updateNote(title: string, content: string): Promise<void> 
 
   debug(`Updating note: "${title}"`);
 
-  // Resolve the note to get its ID
-  const resolved = await resolveNoteTitle(title);
-
-  if (!resolved.success || !resolved.note) {
-    if (resolved.suggestions && resolved.suggestions.length > 0) {
-      throw new Error(
-        `${resolved.error} Suggestions: ${resolved.suggestions.join(", ")}`
-      );
-    }
-    throw new Error(resolved.error || `Note not found: "${title}"`);
-  }
+  const note = await resolveNoteOrThrow(title);
 
   // Convert Markdown to HTML
   const htmlContent = markdownToHtml(content);
-  const escapedNoteId = JSON.stringify(resolved.note.id);
+  const escapedNoteId = JSON.stringify(note.id);
   const escapedContent = JSON.stringify(htmlContent);
 
   debug(`HTML content length: ${htmlContent.length}`);
@@ -167,19 +173,8 @@ export async function deleteNote(title: string): Promise<void> {
 
   debug(`Deleting note: "${title}"`);
 
-  // Resolve the note to get its ID
-  const resolved = await resolveNoteTitle(title);
-
-  if (!resolved.success || !resolved.note) {
-    if (resolved.suggestions && resolved.suggestions.length > 0) {
-      throw new Error(
-        `${resolved.error} Suggestions: ${resolved.suggestions.join(", ")}`
-      );
-    }
-    throw new Error(resolved.error || `Note not found: "${title}"`);
-  }
-
-  const escapedNoteId = JSON.stringify(resolved.note.id);
+  const note = await resolveNoteOrThrow(title);
+  const escapedNoteId = JSON.stringify(note.id);
 
   await runJxa(`
     const app = Application('Notes');
@@ -214,19 +209,8 @@ export async function moveNote(title: string, folder: string): Promise<void> {
 
   debug(`Moving note: "${title}" to folder: "${folder}"`);
 
-  // Resolve the note to get its ID
-  const resolved = await resolveNoteTitle(title);
-
-  if (!resolved.success || !resolved.note) {
-    if (resolved.suggestions && resolved.suggestions.length > 0) {
-      throw new Error(
-        `${resolved.error} Suggestions: ${resolved.suggestions.join(", ")}`
-      );
-    }
-    throw new Error(resolved.error || `Note not found: "${title}"`);
-  }
-
-  const escapedNoteId = JSON.stringify(resolved.note.id);
+  const note = await resolveNoteOrThrow(title);
+  const escapedNoteId = JSON.stringify(note.id);
   const escapedFolder = JSON.stringify(folder);
 
   await runJxa(`
@@ -279,19 +263,8 @@ export async function editTable(
 
   debug(`Editing table ${tableIndex} in note: "${title}"`);
 
-  // Resolve the note
-  const resolved = await resolveNoteTitle(title);
-  if (!resolved.success || !resolved.note) {
-    if (resolved.suggestions && resolved.suggestions.length > 0) {
-      throw new Error(
-        `${resolved.error} Suggestions: ${resolved.suggestions.join(", ")}`
-      );
-    }
-    throw new Error(resolved.error || `Note not found: "${title}"`);
-  }
-
-  // Get current HTML content
-  const escapedNoteId = JSON.stringify(resolved.note.id);
+  const note = await resolveNoteOrThrow(title);
+  const escapedNoteId = JSON.stringify(note.id);
   const htmlResult = await runJxa(`
     const app = Application('Notes');
     const note = app.notes.byId(${escapedNoteId});

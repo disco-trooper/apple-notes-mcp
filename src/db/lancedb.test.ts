@@ -20,6 +20,7 @@ describe("LanceDBStore", () => {
   });
 
   const createTestRecord = (title: string): NoteRecord => ({
+    id: `test-id-${title.toLowerCase().replace(/\s+/g, "-")}`,
     title,
     folder: "Test",
     content: `Content of ${title}`,
@@ -136,6 +137,50 @@ describe("LanceDBStore", () => {
       expect(results).toHaveLength(2);
       expect(results[0]).toHaveProperty("title");
       expect(results[0]).toHaveProperty("score");
+    });
+  });
+
+  describe("rebuildFtsIndex", () => {
+    it("rebuilds FTS index without error", async () => {
+      await store.index([
+        createTestRecord("FTS Note 1"),
+        createTestRecord("FTS Note 2"),
+      ]);
+
+      await expect(store.rebuildFtsIndex()).resolves.not.toThrow();
+    });
+
+    it("works after indexing records", async () => {
+      await store.index([createTestRecord("Note A")]);
+
+      // Rebuild should work on existing table
+      await expect(store.rebuildFtsIndex()).resolves.not.toThrow();
+
+      // Index more records and rebuild again
+      await store.index([createTestRecord("Note B")]);
+      await expect(store.rebuildFtsIndex()).resolves.not.toThrow();
+    });
+  });
+
+  describe("searchFTS", () => {
+    it("returns results matching query text", async () => {
+      await store.index([
+        createTestRecord("Meeting notes"),
+        createTestRecord("Shopping list"),
+      ]);
+      await store.rebuildFtsIndex();
+
+      const results = await store.searchFTS("Meeting", 10);
+      expect(results.length).toBeGreaterThanOrEqual(1);
+      expect(results[0].title).toBe("Meeting notes");
+    });
+
+    it("returns empty array for no matches", async () => {
+      await store.index([createTestRecord("Test note")]);
+      await store.rebuildFtsIndex();
+
+      const results = await store.searchFTS("nonexistentquery12345", 10);
+      expect(results).toHaveLength(0);
     });
   });
 });

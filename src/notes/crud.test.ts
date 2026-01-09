@@ -120,9 +120,12 @@ describe("updateNote", () => {
     vi.mocked(resolveNoteTitle).mockResolvedValueOnce({
       success: false,
       error: "Multiple notes found",
-      suggestions: ["Work/Note", "Personal/Note"],
+      suggestions: [
+        { id: "id-1", folder: "Work", title: "Note", created: "2026-01-09T10:00:00.000Z" },
+        { id: "id-2", folder: "Personal", title: "Note", created: "2026-01-09T11:00:00.000Z" },
+      ],
     });
-    await expect(updateNote("Note", "Content")).rejects.toThrow("Suggestions: Work/Note, Personal/Note");
+    await expect(updateNote("Note", "Content")).rejects.toThrow("Use ID prefix");
   });
 });
 
@@ -159,9 +162,12 @@ describe("deleteNote", () => {
     vi.mocked(resolveNoteTitle).mockResolvedValueOnce({
       success: false,
       error: "Multiple notes found",
-      suggestions: ["Work/Note", "Personal/Note"],
+      suggestions: [
+        { id: "id-1", folder: "Work", title: "Note", created: "2026-01-09T10:00:00.000Z" },
+        { id: "id-2", folder: "Personal", title: "Note", created: "2026-01-09T11:00:00.000Z" },
+      ],
     });
-    await expect(deleteNote("Note")).rejects.toThrow("Suggestions: Work/Note, Personal/Note");
+    await expect(deleteNote("Note")).rejects.toThrow("Use ID prefix");
   });
 });
 
@@ -198,9 +204,12 @@ describe("moveNote", () => {
     vi.mocked(resolveNoteTitle).mockResolvedValueOnce({
       success: false,
       error: "Multiple notes found",
-      suggestions: ["Work/Note", "Personal/Note"],
+      suggestions: [
+        { id: "id-1", folder: "Work", title: "Note", created: "2026-01-09T10:00:00.000Z" },
+        { id: "id-2", folder: "Personal", title: "Note", created: "2026-01-09T11:00:00.000Z" },
+      ],
     });
-    await expect(moveNote("Note", "Archive")).rejects.toThrow("Suggestions: Work/Note, Personal/Note");
+    await expect(moveNote("Note", "Archive")).rejects.toThrow("Use ID prefix");
   });
 });
 
