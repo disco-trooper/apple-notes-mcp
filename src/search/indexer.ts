@@ -19,8 +19,7 @@ import { EMBEDDING_DELAY_MS } from "../config/constants.js";
  * Handles nested folders correctly by taking the last segment.
  */
 export function extractTitleFromKey(key: string): string {
-  const parts = key.split("/");
-  return parts[parts.length - 1];
+  return key.split("/").at(-1) ?? key;
 }
 
 // Debug logging
@@ -268,6 +267,12 @@ export async function incrementalIndex(): Promise<IndexResult> {
       failedNotes.push(`DELETE: ${key}`);
       errors++;
     }
+  }
+
+  // Rebuild FTS index if any changes were made
+  if (toAdd.length > 0 || toUpdate.length > 0 || toDelete.length > 0) {
+    debug("Rebuilding FTS index after incremental changes");
+    await store.rebuildFtsIndex();
   }
 
   const timeMs = Date.now() - startTime;
