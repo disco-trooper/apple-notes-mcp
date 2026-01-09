@@ -122,7 +122,7 @@ describe("updateNote", () => {
       error: "Multiple notes found",
       suggestions: ["Work/Note", "Personal/Note"],
     });
-    await expect(updateNote("Note", "Content")).rejects.toThrow("Suggestions: Work/Note, Personal/Note");
+    await expect(updateNote("Note", "Content")).rejects.toThrow("Use folder prefix: Work/Note, Personal/Note");
   });
 });
 
@@ -161,7 +161,7 @@ describe("deleteNote", () => {
       error: "Multiple notes found",
       suggestions: ["Work/Note", "Personal/Note"],
     });
-    await expect(deleteNote("Note")).rejects.toThrow("Suggestions: Work/Note, Personal/Note");
+    await expect(deleteNote("Note")).rejects.toThrow("Use folder prefix: Work/Note, Personal/Note");
   });
 });
 
@@ -200,7 +200,7 @@ describe("moveNote", () => {
       error: "Multiple notes found",
       suggestions: ["Work/Note", "Personal/Note"],
     });
-    await expect(moveNote("Note", "Archive")).rejects.toThrow("Suggestions: Work/Note, Personal/Note");
+    await expect(moveNote("Note", "Archive")).rejects.toThrow("Use folder prefix: Work/Note, Personal/Note");
   });
 });
 
