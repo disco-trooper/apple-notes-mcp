@@ -33,6 +33,4 @@ coverage/
 # Note: User data is in ~/.apple-notes-mcp/, not here
 
 # Claude Code
-CLAUDE.md
 .claude/
-docs/plans/

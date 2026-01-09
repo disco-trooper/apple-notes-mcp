@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-01-09
+
+### Added
+- ID-based note lookup with `id:xxx` prefix for precise disambiguation
+- Typed error classes: `NoteNotFoundError`, `DuplicateNoteError`, `ReadOnlyModeError`, `FolderNotFoundError`, `TableOutOfBoundsError`
+- Input validation with max length limits on Zod schemas
+
+### Fixed
+- FTS index rebuild after `reindexNote()` - keyword search now works after single-note reindex
+- Hybrid search key collision - use note ID instead of title for RRF score calculation
+- HTML escaping in table cell values to prevent injection
+- Correct LanceDB FTS API usage (`table.query().fullTextSearch()`)
+
+### Changed
+- Refactored `read.ts` into smaller modules: `read.ts`, `resolve.ts`, `conversion.ts`
+- Removed Smithery integration (server.ts)
+- Simplified `updateTableCell` with helper functions
+
 ## [1.1.0] - 2026-01-09
 
 ### Added
@@ -33,7 +51,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Read-only mode via `READONLY_MODE` env variable
 - Debug logging via `DEBUG` env variable
 
-[Unreleased]: https://github.com/disco-trooper/apple-notes-mcp/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/disco-trooper/apple-notes-mcp/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/disco-trooper/apple-notes-mcp/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/disco-trooper/apple-notes-mcp/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/disco-trooper/apple-notes-mcp/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/disco-trooper/apple-notes-mcp/releases/tag/v1.0.0
