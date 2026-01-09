@@ -41,10 +41,9 @@ export function detectProvider(): EmbeddingProvider {
 
 /**
  * Get the current embedding provider.
- * Call detectProvider() first to ensure detection has occurred.
  */
 export function getProvider(): EmbeddingProvider {
-  return detectedProvider || detectProvider();
+  return detectedProvider ?? detectProvider();
 }
 
 /**

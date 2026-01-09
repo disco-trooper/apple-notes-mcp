@@ -37,9 +37,6 @@ export interface SearchOptions {
   include_content?: boolean;
 }
 
-// SearchResult is imported from ../types/index.js
-// RRF_K is imported from ../config/constants.js
-
 /**
  * Calculate RRF score for a result at a given rank.
  * Formula: 1 / (k + rank)
@@ -276,7 +273,6 @@ export async function searchNotes(
 }
 
 // Re-export types for convenience
-export type { SearchMode as Mode };
 export type { SearchResult } from "../types/index.js";
 
 // Export utility functions for testing
