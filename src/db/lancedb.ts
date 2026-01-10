@@ -597,6 +597,34 @@ export class ChunkStore {
     });
     debug("ChunkStore: FTS index rebuilt");
   }
+
+  /**
+   * Delete chunks for multiple notes at once.
+   */
+  async deleteChunksByNoteIds(noteIds: string[]): Promise<void> {
+    if (noteIds.length === 0) return;
+
+    const table = await this.ensureTable();
+    for (const noteId of noteIds) {
+      const escapedNoteId = escapeForFilter(noteId);
+      await table.delete(`note_id = '${escapedNoteId}'`);
+    }
+    debug(`ChunkStore: Deleted chunks for ${noteIds.length} notes`);
+  }
+
+  /**
+   * Add chunks to existing table (for incremental updates).
+   */
+  async addChunks(chunks: ChunkRecord[]): Promise<void> {
+    if (chunks.length === 0) return;
+
+    const table = await this.ensureTable();
+    await table.add(chunks);
+    debug(`ChunkStore: Added ${chunks.length} chunks`);
+
+    // Rebuild FTS index after adding
+    await this.rebuildFtsIndex();
+  }
 }
 
 // Singleton instance for ChunkStore

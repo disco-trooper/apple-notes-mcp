@@ -205,3 +205,50 @@ export async function hasChunkIndex(): Promise<boolean> {
     return false;
   }
 }
+
+/**
+ * Update chunks for specific notes (used by smart refresh).
+ * Deletes old chunks for these notes and creates new ones.
+ *
+ * @param notes - Notes to update chunks for
+ * @returns Number of chunks created
+ */
+export async function updateChunksForNotes(notes: NoteDetails[]): Promise<number> {
+  if (notes.length === 0) return 0;
+
+  debug(`Updating chunks for ${notes.length} notes...`);
+
+  // Chunk all notes
+  const allChunks: InternalChunkRecord[] = [];
+  for (const note of notes) {
+    const noteChunks = chunkNote(note);
+    allChunks.push(...noteChunks);
+  }
+
+  if (allChunks.length === 0) {
+    debug("No chunks to update");
+    return 0;
+  }
+
+  // Generate embeddings
+  debug(`Generating embeddings for ${allChunks.length} chunks...`);
+  const chunkTexts = allChunks.map((chunk) => chunk.content);
+  const vectors = await getEmbeddingBatch(chunkTexts);
+
+  // Combine with vectors
+  const indexedAt = new Date().toISOString();
+  const completeChunks: ChunkRecord[] = allChunks.map((chunk, i) => ({
+    ...chunk,
+    vector: vectors[i],
+    indexed_at: indexedAt,
+  }));
+
+  // Delete old chunks for these notes and add new ones
+  const chunkStore = getChunkStore();
+  const noteIds = notes.map((n) => n.id);
+  await chunkStore.deleteChunksByNoteIds(noteIds);
+  await chunkStore.addChunks(completeChunks);
+
+  debug(`Updated ${completeChunks.length} chunks for ${notes.length} notes`);
+  return completeChunks.length;
+}
