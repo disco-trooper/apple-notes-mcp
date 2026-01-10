@@ -25,7 +25,7 @@ const debug = createDebugLogger("LOCAL");
 
 // Lazy-loaded pipeline
 type FeatureExtractionPipeline = (
-  text: string,
+  text: string | string[],
   options?: { pooling?: string; normalize?: boolean }
 ) => Promise<{ tolist: () => number[][] }>;
 
@@ -38,6 +38,27 @@ let pipelinePromise: Promise<FeatureExtractionPipeline> | null = null;
  */
 function getModelName(): string {
   return process.env.EMBEDDING_MODEL || DEFAULT_MODEL;
+}
+
+/**
+ * Check if the model is an E5 model that requires prefixed input.
+ */
+function isE5Model(): boolean {
+  return getModelName().toLowerCase().includes("e5");
+}
+
+/**
+ * Prepare text for embedding by adding E5 prefix if needed.
+ */
+function prepareText(text: string): string {
+  return isE5Model() ? `passage: ${text}` : text;
+}
+
+/**
+ * Prepare multiple texts for embedding by adding E5 prefix if needed.
+ */
+function prepareTexts(texts: string[]): string[] {
+  return isE5Model() ? texts.map(t => `passage: ${t}`) : texts;
 }
 
 /**
@@ -116,19 +137,11 @@ export async function getLocalEmbedding(text: string): Promise<number[]> {
   const startTime = Date.now();
 
   try {
-    // For e5 models, prepend "passage: " for document embedding
-    // or "query: " for search queries - using passage for general text
-    const modelName = getModelName();
-    const isE5Model = modelName.toLowerCase().includes("e5");
-    const inputText = isE5Model ? `passage: ${text}` : text;
-
-    // Run inference with mean pooling and normalization
-    const output = await pipe(inputText, {
+    const output = await pipe(prepareText(text), {
       pooling: "mean",
       normalize: true,
     });
 
-    // Extract the embedding vector
     const embedding = output.tolist()[0];
 
     const inferenceTime = Date.now() - startTime;
@@ -177,4 +190,42 @@ export function getLocalModelName(): string {
  */
 export function isModelLoaded(): boolean {
   return pipelineInstance !== null;
+}
+
+/**
+ * Generate embeddings for multiple texts in a single batch call.
+ * More efficient than calling getLocalEmbedding for each text individually.
+ *
+ * @param texts - Array of texts to embed
+ * @returns Promise resolving to array of embedding vectors
+ * @throws Error if model loading or inference fails
+ */
+export async function getLocalEmbeddingBatch(texts: string[]): Promise<number[][]> {
+  if (!texts || texts.length === 0) {
+    return [];
+  }
+
+  const pipe = await getPipeline();
+
+  debug(`Generating batch embeddings for ${texts.length} texts`);
+  const startTime = Date.now();
+
+  try {
+    const output = await pipe(prepareTexts(texts), {
+      pooling: "mean",
+      normalize: true,
+    });
+
+    const embeddings = output.tolist() as number[][];
+
+    const inferenceTime = Date.now() - startTime;
+    debug(`Batch embeddings generated in ${inferenceTime}ms (${embeddings.length} vectors, ${embeddings[0]?.length ?? 0} dims)`);
+
+    return embeddings;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    debug(`Batch embedding generation failed: ${message}`);
+
+    throw new Error(`Failed to generate batch embeddings: ${message}`);
+  }
 }

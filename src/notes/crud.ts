@@ -116,19 +116,41 @@ export async function createNote(
 }
 
 /**
+ * Result of an update operation.
+ * Apple Notes may rename the note based on content (first h1 heading).
+ */
+export interface UpdateResult {
+  /** Original title before update */
+  originalTitle: string;
+  /** Current title after update (may differ if Apple Notes renamed it) */
+  newTitle: string;
+  /** Folder containing the note */
+  folder: string;
+  /** Whether the title changed */
+  titleChanged: boolean;
+}
+
+/**
  * Update an existing note's content.
+ *
+ * Note: Apple Notes may automatically rename the note based on the first
+ * heading in the content. The returned UpdateResult contains the actual
+ * title after the update.
  *
  * @param title - Note title (supports folder prefix: "Work/My Note")
  * @param content - New content (Markdown)
+ * @returns UpdateResult with original and new title
  * @throws Error if READONLY_MODE is enabled
  * @throws Error if note not found or duplicate titles without folder prefix
  */
-export async function updateNote(title: string, content: string): Promise<void> {
+export async function updateNote(title: string, content: string): Promise<UpdateResult> {
   checkReadOnly();
 
   debug(`Updating note: "${title}"`);
 
   const note = await resolveNoteOrThrow(title);
+  const originalTitle = note.title;
+  const folder = note.folder;
 
   // Convert Markdown to HTML
   const htmlContent = markdownToHtml(content);
@@ -137,7 +159,8 @@ export async function updateNote(title: string, content: string): Promise<void> 
 
   debug(`HTML content length: ${htmlContent.length}`);
 
-  await runJxa(`
+  // Update the note and get its new title (Apple Notes may rename it)
+  const result = await runJxa(`
     const app = Application('Notes');
     const noteId = ${escapedNoteId};
     const content = ${escapedContent};
@@ -152,10 +175,25 @@ export async function updateNote(title: string, content: string): Promise<void> 
     // Update the body
     note.body = content;
 
-    return "ok";
-  `);
+    // Return the current title (may have changed)
+    return JSON.stringify({ newTitle: note.name() });
+  `) as string;
 
-  debug(`Note updated: "${title}"`);
+  const { newTitle } = JSON.parse(result);
+  const titleChanged = newTitle !== originalTitle;
+
+  if (titleChanged) {
+    debug(`Note renamed by Apple Notes: "${originalTitle}" -> "${newTitle}"`);
+  } else {
+    debug(`Note updated: "${title}"`);
+  }
+
+  return {
+    originalTitle,
+    newTitle,
+    folder,
+    titleChanged,
+  };
 }
 
 /**

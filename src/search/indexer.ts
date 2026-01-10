@@ -7,13 +7,13 @@
  * - Single note reindexing
  */
 
-import { getEmbedding } from "../embeddings/index.js";
+import { getEmbedding, getEmbeddingBatch } from "../embeddings/index.js";
 import { getVectorStore, type NoteRecord } from "../db/lancedb.js";
-import { getAllNotes, getNoteByFolderAndTitle, getNoteByTitle, type NoteInfo } from "../notes/read.js";
+import { getAllNotes, getAllNotesWithContent, getNoteByFolderAndTitle, getNoteByTitle, type NoteInfo } from "../notes/read.js";
 import { createDebugLogger } from "../utils/debug.js";
 import { truncateForEmbedding } from "../utils/text.js";
-import { EMBEDDING_DELAY_MS } from "../config/constants.js";
 import { NoteNotFoundError } from "../errors/index.js";
+import { extractMetadata } from "../graph/extract.js";
 
 /**
  * Extract note title from folder/title key.
@@ -50,90 +50,127 @@ export interface IndexResult {
 }
 
 /**
- * Sleep for a specified duration.
+ * Note data prepared for embedding.
  */
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+interface PreparedNote {
+  id: string;
+  title: string;
+  content: string;
+  truncatedContent: string;
+  folder: string;
+  created: string;
+  modified: string;
+  tags: string[];
+  outlinks: string[];
+}
+
+/**
+ * Prepare a note for embedding by extracting metadata and truncating content.
+ * Returns null if the note content is empty.
+ */
+function prepareNoteForEmbedding(note: {
+  id: string;
+  title: string;
+  content: string;
+  folder: string;
+  created: string;
+  modified: string;
+}): PreparedNote | null {
+  if (!note.content.trim()) {
+    return null;
+  }
+
+  const metadata = extractMetadata(note.content);
+
+  return {
+    id: note.id,
+    title: note.title,
+    content: note.content,
+    truncatedContent: truncateForEmbedding(note.content),
+    folder: note.folder,
+    created: note.created,
+    modified: note.modified,
+    tags: metadata.tags,
+    outlinks: metadata.outlinks,
+  };
+}
+
+/**
+ * Build a NoteRecord from a PreparedNote and its embedding vector.
+ */
+function buildNoteRecord(
+  note: PreparedNote,
+  vector: number[],
+  indexedAt: string
+): NoteRecord {
+  return {
+    id: note.id,
+    title: note.title,
+    content: note.content,
+    vector,
+    folder: note.folder,
+    created: note.created,
+    modified: note.modified,
+    indexed_at: indexedAt,
+    tags: note.tags,
+    outlinks: note.outlinks,
+  };
 }
 
 /**
  * Perform full reindexing of all notes.
  * Drops existing index and rebuilds from scratch.
+ * Uses single JXA call + batch embedding for maximum speed.
  */
 export async function fullIndex(): Promise<IndexResult> {
   const startTime = Date.now();
   debug("Starting full index...");
 
-  // Get all notes from Apple Notes
-  const notes = await getAllNotes();
-  debug(`Found ${notes.length} notes in Apple Notes`);
+  // Phase 1: Fetch all notes with content in single JXA call
+  debug("Phase 1: Fetching all notes with content (single JXA call)...");
+  const allNotes = await getAllNotesWithContent();
+  debug(`Fetched ${allNotes.length} notes from Apple Notes`);
 
-  const records: NoteRecord[] = [];
-  let errors = 0;
-  const failedNotes: string[] = [];
+  // Filter empty notes and prepare for embedding
+  const preparedNotes = allNotes
+    .map(prepareNoteForEmbedding)
+    .filter((note): note is PreparedNote => note !== null);
 
-  for (let i = 0; i < notes.length; i++) {
-    const noteInfo = notes[i];
-    debug(`Processing ${i + 1}/${notes.length}: ${noteInfo.title}`);
+  debug(`Prepared ${preparedNotes.length} notes for embedding`);
 
-    try {
-      // Get full note content using folder and title separately
-      // to handle notes with "/" in their titles
-      const noteDetails = await getNoteByFolderAndTitle(noteInfo.folder, noteInfo.title);
-      if (!noteDetails) {
-        debug(`Could not fetch note: ${noteInfo.title}`);
-        failedNotes.push(`${noteInfo.folder}/${noteInfo.title}`);
-        errors++;
-        continue;
-      }
+  // Phase 2: Generate embeddings in batch (with concurrent API calls)
+  debug("Phase 2: Generating embeddings in batch...");
+  const textsToEmbed = preparedNotes.map(n => n.truncatedContent);
 
-      // Skip empty notes
-      if (!noteDetails.content.trim()) {
-        debug(`Skipping empty note: ${noteInfo.title}`);
-        continue;
-      }
-
-      // Generate embedding
-      const content = truncateForEmbedding(noteDetails.content);
-      const vector = await getEmbedding(content);
-
-      const record: NoteRecord = {
-        id: noteDetails.id,
-        title: noteDetails.title,
-        content: noteDetails.content,
-        vector,
-        folder: noteDetails.folder,
-        created: noteDetails.created,
-        modified: noteDetails.modified,
-        indexed_at: new Date().toISOString(),
-      };
-
-      records.push(record);
-
-      // Delay to avoid rate limiting
-      if (i < notes.length - 1) {
-        await sleep(EMBEDDING_DELAY_MS);
-      }
-    } catch (error) {
-      debug(`Error processing ${noteInfo.title}:`, error);
-      failedNotes.push(`${noteInfo.folder}/${noteInfo.title}`);
-      errors++;
-    }
+  let vectors: number[][];
+  try {
+    vectors = await getEmbeddingBatch(textsToEmbed);
+  } catch (error) {
+    debug("Batch embedding failed:", error);
+    throw error;
   }
 
-  // Store all records in vector database
+  debug(`Generated ${vectors.length} embeddings`);
+
+  // Phase 3: Build records and store
+  debug("Phase 3: Storing in database...");
+  const indexedAt = new Date().toISOString();
+  const records = preparedNotes.map((note, i) =>
+    buildNoteRecord(note, vectors[i], indexedAt)
+  );
+
   const store = getVectorStore();
   await store.index(records);
 
   const timeMs = Date.now() - startTime;
-  debug(`Full index complete: ${records.length} indexed, ${errors} errors, ${timeMs}ms`);
+  const skipped = allNotes.length - preparedNotes.length;
+  debug(`Full index complete: ${records.length} indexed, ${skipped} empty/skipped, ${timeMs}ms`);
 
   return {
-    total: notes.length,
+    total: allNotes.length,
     indexed: records.length,
-    errors,
+    errors: 0,
     timeMs,
-    failedNotes: failedNotes.length > 0 ? failedNotes : undefined,
   };
 }
 
@@ -212,48 +249,63 @@ export async function incrementalIndex(): Promise<IndexResult> {
   let errors = 0;
   const failedNotes: string[] = [];
 
-  // Process additions and updates
+  // Process additions and updates in batch
   const toProcess = [...toAdd, ...toUpdate];
-  for (let i = 0; i < toProcess.length; i++) {
-    const noteInfo = toProcess[i];
-    debug(`Processing ${i + 1}/${toProcess.length}: ${noteInfo.title}`);
 
-    try {
-      // Use folder and title separately to handle "/" in titles
-      const noteDetails = await getNoteByFolderAndTitle(noteInfo.folder, noteInfo.title);
-      if (!noteDetails) {
+  if (toProcess.length > 0) {
+    // Phase 1: Fetch all note content
+    debug(`Phase 1: Fetching ${toProcess.length} notes content...`);
+    const preparedNotes: PreparedNote[] = [];
+
+    for (const noteInfo of toProcess) {
+      try {
+        const noteDetails = await getNoteByFolderAndTitle(noteInfo.folder, noteInfo.title);
+        if (!noteDetails) {
+          failedNotes.push(`${noteInfo.folder}/${noteInfo.title}`);
+          errors++;
+          continue;
+        }
+
+        const prepared = prepareNoteForEmbedding(noteDetails);
+        if (prepared) {
+          preparedNotes.push(prepared);
+        }
+      } catch (error) {
+        debug(`Error fetching ${noteInfo.title}:`, error);
         failedNotes.push(`${noteInfo.folder}/${noteInfo.title}`);
         errors++;
-        continue;
+      }
+    }
+
+    if (preparedNotes.length > 0) {
+      // Phase 2: Generate embeddings in batch
+      debug(`Phase 2: Generating ${preparedNotes.length} embeddings in batch...`);
+      const textsToEmbed = preparedNotes.map(n => n.truncatedContent);
+
+      let vectors: number[][];
+      try {
+        vectors = await getEmbeddingBatch(textsToEmbed);
+      } catch (error) {
+        debug("Batch embedding failed:", error);
+        throw error;
       }
 
-      if (!noteDetails.content.trim()) {
-        continue;
+      // Phase 3: Update database
+      debug("Phase 3: Updating database...");
+      const indexedAt = new Date().toISOString();
+
+      for (let i = 0; i < preparedNotes.length; i++) {
+        const note = preparedNotes[i];
+        const record = buildNoteRecord(note, vectors[i], indexedAt);
+
+        try {
+          await store.update(record);
+        } catch (error) {
+          debug(`Error updating ${note.title}:`, error);
+          failedNotes.push(`${note.folder}/${note.title}`);
+          errors++;
+        }
       }
-
-      const content = truncateForEmbedding(noteDetails.content);
-      const vector = await getEmbedding(content);
-
-      const record: NoteRecord = {
-        id: noteDetails.id,
-        title: noteDetails.title,
-        content: noteDetails.content,
-        vector,
-        folder: noteDetails.folder,
-        created: noteDetails.created,
-        modified: noteDetails.modified,
-        indexed_at: new Date().toISOString(),
-      };
-
-      await store.update(record);
-
-      if (i < toProcess.length - 1) {
-        await sleep(EMBEDDING_DELAY_MS);
-      }
-    } catch (error) {
-      debug(`Error processing ${noteInfo.title}:`, error);
-      failedNotes.push(`${noteInfo.folder}/${noteInfo.title}`);
-      errors++;
     }
   }
 
@@ -307,23 +359,13 @@ export async function reindexNote(title: string): Promise<void> {
     throw new NoteNotFoundError(title);
   }
 
-  if (!noteDetails.content.trim()) {
+  const prepared = prepareNoteForEmbedding(noteDetails);
+  if (!prepared) {
     throw new Error(`Note is empty: "${title}"`);
   }
 
-  const content = truncateForEmbedding(noteDetails.content);
-  const vector = await getEmbedding(content);
-
-  const record: NoteRecord = {
-    id: noteDetails.id,
-    title: noteDetails.title,
-    content: noteDetails.content,
-    vector,
-    folder: noteDetails.folder,
-    created: noteDetails.created,
-    modified: noteDetails.modified,
-    indexed_at: new Date().toISOString(),
-  };
+  const vector = await getEmbedding(prepared.truncatedContent);
+  const record = buildNoteRecord(prepared, vector, new Date().toISOString());
 
   const store = getVectorStore();
   await store.update(record);

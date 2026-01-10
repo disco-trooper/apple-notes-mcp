@@ -1,3 +1,11 @@
+#!/usr/bin/env bun
+import { hasConfig, getEnvPath } from "./config/paths.js";
+import { checkBunRuntime, isTTY } from "./utils/runtime.js";
+import * as dotenv from "dotenv";
+
+// Load config from unified location
+dotenv.config({ path: getEnvPath() });
+
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -5,7 +13,6 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import "dotenv/config";
 
 // Import constants
 import {
@@ -17,16 +24,52 @@ import {
 import { validateEnv } from "./config/env.js";
 
 // Import implementations
-import { getVectorStore } from "./db/lancedb.js";
+import { getVectorStore, getChunkStore } from "./db/lancedb.js";
 import { getNoteByTitle, getAllFolders } from "./notes/read.js";
 import { createNote, updateNote, deleteNote, moveNote, editTable } from "./notes/crud.js";
 import { searchNotes } from "./search/index.js";
 import { indexNotes, reindexNote } from "./search/indexer.js";
+import { fullChunkIndex, hasChunkIndex } from "./search/chunk-indexer.js";
+import { searchChunks } from "./search/chunk-search.js";
+import { listTags, searchByTag, findRelatedNotes } from "./graph/queries.js";
+import { exportGraph } from "./graph/export.js";
 
 // Debug logging and error handling
 import { createDebugLogger } from "./utils/debug.js";
 import { sanitizeErrorMessage } from "./utils/errors.js";
 const debug = createDebugLogger("MCP");
+
+// Runtime and config checks
+checkBunRuntime();
+
+if (!hasConfig()) {
+  if (isTTY()) {
+    // Interactive terminal - run setup wizard
+    console.log("No configuration found. Starting setup wizard...\n");
+    const { spawn } = await import("node:child_process");
+    const setupPath = new URL("./setup.ts", import.meta.url).pathname;
+    const child = spawn("bun", ["run", setupPath], {
+      stdio: "inherit",
+    });
+    child.on("exit", (code) => process.exit(code ?? 0));
+    // Wait for setup to complete
+    await new Promise(() => {}); // Setup will exit the process
+  } else {
+    // Non-interactive (MCP server mode) - show error
+    console.error(`
+╭─────────────────────────────────────────────────────────────╮
+│  apple-notes-mcp: Configuration required                    │
+│                                                             │
+│  Run this command in your terminal first:                   │
+│                                                             │
+│      apple-notes-mcp                                        │
+│                                                             │
+│  The setup wizard will guide you through configuration.     │
+╰─────────────────────────────────────────────────────────────╯
+`);
+    process.exit(1);
+  }
+}
 
 // Tool parameter schemas
 const SearchNotesSchema = z.object({
@@ -80,6 +123,26 @@ const EditTableSchema = z.object({
     column: z.number().min(0),
     value: z.string().max(10000),
   })).min(1).max(100),
+});
+
+// Knowledge Graph tool schemas
+const ListTagsSchema = z.object({});
+
+const SearchByTagSchema = z.object({
+  tag: z.string().min(1).max(100),
+  folder: z.string().max(200).optional(),
+  limit: z.number().min(1).max(MAX_SEARCH_LIMIT).default(DEFAULT_SEARCH_LIMIT),
+});
+
+const RelatedNotesSchema = z.object({
+  title: z.string().min(1).max(MAX_TITLE_LENGTH),
+  types: z.array(z.enum(["tag", "link", "similar"])).default(["tag", "link", "similar"]),
+  limit: z.number().min(1).max(50).default(10),
+});
+
+const ExportGraphSchema = z.object({
+  format: z.enum(["json", "graphml"]),
+  folder: z.string().max(200).optional(),
 });
 
 // Create MCP server
@@ -271,6 +334,62 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ["title", "edits"],
         },
       },
+      // Knowledge Graph tools
+      {
+        name: "list-tags",
+        description: "List all tags with occurrence counts",
+        inputSchema: {
+          type: "object",
+          properties: {},
+          required: [],
+        },
+      },
+      {
+        name: "search-by-tag",
+        description: "Find notes with a specific tag",
+        inputSchema: {
+          type: "object",
+          properties: {
+            tag: { type: "string", description: "Tag to search for (without #)" },
+            folder: { type: "string", description: "Filter by folder (optional)" },
+            limit: { type: "number", description: "Max results (default: 20)" },
+          },
+          required: ["tag"],
+        },
+      },
+      {
+        name: "related-notes",
+        description: "Find notes related to a source note by tags, links, or semantic similarity",
+        inputSchema: {
+          type: "object",
+          properties: {
+            title: { type: "string", description: "Source note title (use folder/title or id:xxx)" },
+            types: {
+              type: "array",
+              items: { type: "string", enum: ["tag", "link", "similar"] },
+              description: "Relationship types to include (default: all)"
+            },
+            limit: { type: "number", description: "Max results (default: 10)" },
+          },
+          required: ["title"],
+        },
+      },
+      {
+        name: "export-graph",
+        description: "Export knowledge graph to JSON or GraphML format for visualization",
+        inputSchema: {
+          type: "object",
+          properties: {
+            format: {
+              type: "string",
+              enum: ["json", "graphml"],
+              description: "Export format: json (for D3.js, custom viz) or graphml (for Gephi, yEd)"
+            },
+            folder: { type: "string", description: "Filter by folder (optional)" },
+          },
+          required: ["format"],
+        },
+      },
     ],
   };
 });
@@ -285,6 +404,38 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // Read tools
       case "search-notes": {
         const params = SearchNotesSchema.parse(args);
+
+        // Use chunk-based search if chunk index exists (better for long notes)
+        const useChunkSearch = await hasChunkIndex();
+
+        if (useChunkSearch) {
+          debug("Using chunk-based search");
+          const chunkResults = await searchChunks(params.query, {
+            folder: params.folder,
+            limit: params.limit,
+            mode: params.mode,
+          });
+
+          if (chunkResults.length === 0) {
+            return textResponse("No notes found matching your query.");
+          }
+
+          // Transform chunk results to match expected format
+          const results = chunkResults.map((r) => ({
+            id: r.note_id,
+            title: r.note_title,
+            folder: r.folder,
+            preview: r.matchedChunk.slice(0, 200) + (r.matchedChunk.length > 200 ? "..." : ""),
+            modified: r.modified,
+            score: r.score,
+            matchedChunkIndex: r.matchedChunkIndex,
+          }));
+
+          return textResponse(JSON.stringify(results, null, 2));
+        }
+
+        // Fall back to legacy search if no chunk index
+        debug("Using legacy search (no chunk index)");
         const results = await searchNotes(params.query, {
           folder: params.folder,
           limit: params.limit,
@@ -316,6 +467,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
         }
 
+        // Run chunk indexing for full mode (for semantic search on long notes)
+        if (params.mode === "full") {
+          debug("Running chunk indexing for full mode...");
+          const chunkResult = await fullChunkIndex();
+          message += `\nChunk index: ${chunkResult.totalChunks} chunks from ${chunkResult.totalNotes} notes in ${(chunkResult.timeMs / 1000).toFixed(1)}s`;
+        }
+
         return textResponse(message);
       }
 
@@ -327,8 +485,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "list-notes": {
         const store = getVectorStore();
-        const count = await store.count();
-        return textResponse(`${count} notes indexed. Run index-notes to update the index.`);
+        const noteCount = await store.count();
+
+        let message = `${noteCount} notes indexed.`;
+
+        // Show chunk statistics if chunk index exists
+        const hasChunks = await hasChunkIndex();
+        if (hasChunks) {
+          const chunkStore = getChunkStore();
+          const chunkCount = await chunkStore.count();
+          message += ` ${chunkCount} chunks indexed for semantic search.`;
+        } else {
+          message += " Run index-notes with mode='full' to enable chunk-based search.";
+        }
+
+        return textResponse(message);
       }
 
       case "get-note": {
@@ -363,19 +534,27 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "update-note": {
         const params = UpdateNoteSchema.parse(args);
-        await updateNote(params.title, params.content);
+        const result = await updateNote(params.title, params.content);
+
+        // Build location string for messages
+        const location = `${result.folder}/${result.newTitle}`;
+        const renamedMsg = result.titleChanged
+          ? ` (renamed from "${result.originalTitle}")`
+          : "";
 
         if (params.reindex) {
           try {
-            await reindexNote(params.title);
-            return textResponse(`Updated and reindexed note: "${params.title}"`);
+            // Use new title for reindexing (Apple Notes may have renamed it)
+            const reindexTitle = `${result.folder}/${result.newTitle}`;
+            await reindexNote(reindexTitle);
+            return textResponse(`Updated and reindexed note: "${location}"${renamedMsg}`);
           } catch (reindexError) {
             debug("Reindex after update failed:", reindexError);
-            return textResponse(`Updated note: "${params.title}" (reindexing failed, run index-notes to update)`);
+            return textResponse(`Updated note: "${location}"${renamedMsg} (reindexing failed, run index-notes to update)`);
           }
         }
 
-        return textResponse(`Updated note: "${params.title}"`);
+        return textResponse(`Updated note: "${location}"${renamedMsg}`);
       }
 
       case "delete-note": {
@@ -397,6 +576,67 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const params = EditTableSchema.parse(args);
         await editTable(params.title, params.table_index, params.edits);
         return textResponse(`Updated ${params.edits.length} cell(s) in table ${params.table_index}`);
+      }
+
+      // Knowledge Graph tools
+      case "list-tags": {
+        ListTagsSchema.parse(args);
+        const tags = await listTags();
+
+        if (tags.length === 0) {
+          return textResponse("No tags found. Add #tags to your notes and reindex.");
+        }
+
+        return textResponse(JSON.stringify(tags, null, 2));
+      }
+
+      case "search-by-tag": {
+        const params = SearchByTagSchema.parse(args);
+        const results = await searchByTag(params.tag, {
+          folder: params.folder,
+          limit: params.limit,
+        });
+
+        if (results.length === 0) {
+          return textResponse(`No notes found with tag: #${params.tag}`);
+        }
+
+        return textResponse(JSON.stringify(results, null, 2));
+      }
+
+      case "related-notes": {
+        const params = RelatedNotesSchema.parse(args);
+
+        // Resolve note to get ID
+        const note = await getNoteByTitle(params.title);
+        if (!note) {
+          return errorResponse(`Note not found: "${params.title}"`);
+        }
+
+        const results = await findRelatedNotes(note.id, {
+          types: params.types,
+          limit: params.limit,
+        });
+
+        if (results.length === 0) {
+          return textResponse("No related notes found.");
+        }
+
+        return textResponse(JSON.stringify(results, null, 2));
+      }
+
+      case "export-graph": {
+        const params = ExportGraphSchema.parse(args);
+        const result = await exportGraph({
+          format: params.format,
+          folder: params.folder,
+        });
+
+        if (typeof result === "string") {
+          return textResponse(result);
+        }
+
+        return textResponse(JSON.stringify(result, null, 2));
       }
 
       default:

@@ -40,8 +40,18 @@ export interface NoteDetails extends NoteInfo {
 }
 
 // -----------------------------------------------------------------------------
-// Internal JXA helpers
+// Internal types and helpers
 // -----------------------------------------------------------------------------
+
+/** Raw note data from JXA before markdown conversion */
+interface RawNoteData {
+  id: string;
+  title: string;
+  folder: string;
+  created: string;
+  modified: string;
+  htmlContent: string;
+}
 
 /**
  * Execute JXA code safely with error handling
@@ -56,6 +66,21 @@ async function executeJxa<T>(code: string): Promise<T> {
       `JXA execution failed: ${error instanceof Error ? error.message : String(error)}`
     );
   }
+}
+
+/**
+ * Convert raw JXA note data to NoteDetails with markdown content
+ */
+function toNoteDetails(raw: RawNoteData): NoteDetails {
+  return {
+    id: raw.id,
+    title: raw.title,
+    folder: raw.folder,
+    created: raw.created,
+    modified: raw.modified,
+    content: htmlToMarkdown(raw.htmlContent),
+    htmlContent: raw.htmlContent,
+  };
 }
 
 // -----------------------------------------------------------------------------
@@ -180,14 +205,7 @@ export async function getNoteByTitle(
   `;
 
   const result = await executeJxa<string>(jxaCode);
-  const notes = JSON.parse(result) as Array<{
-    id: string;
-    title: string;
-    folder: string;
-    created: string;
-    modified: string;
-    htmlContent: string;
-  }>;
+  const notes = JSON.parse(result) as RawNoteData[];
 
   if (notes.length === 0) {
     debug("Note not found");
@@ -196,27 +214,11 @@ export async function getNoteByTitle(
 
   if (notes.length > 1) {
     debug(`Multiple notes found with title: ${targetTitle}`);
-    // If folder wasn't specified and multiple exist, return the first one
-    // but log a warning
-    debug(
-      "Returning first match. Use folder/title format for disambiguation."
-    );
+    debug("Returning first match. Use folder/title format for disambiguation.");
   }
 
-  const note = notes[0];
-  const content = htmlToMarkdown(note.htmlContent);
-
-  debug(`Found note in folder: ${note.folder}`);
-
-  return {
-    id: note.id,
-    title: note.title,
-    folder: note.folder,
-    created: note.created,
-    modified: note.modified,
-    content,
-    htmlContent: note.htmlContent,
-  };
+  debug(`Found note in folder: ${notes[0].folder}`);
+  return toNoteDetails(notes[0]);
 }
 
 /**
@@ -268,33 +270,15 @@ export async function getNoteById(id: string): Promise<NoteDetails | null> {
   `;
 
   const result = await executeJxa<string>(jxaCode);
-  const note = JSON.parse(result) as {
-    id: string;
-    title: string;
-    folder: string;
-    created: string;
-    modified: string;
-    htmlContent: string;
-  } | null;
+  const note = JSON.parse(result) as RawNoteData | null;
 
   if (!note) {
     debug("Note not found by ID");
     return null;
   }
 
-  const content = htmlToMarkdown(note.htmlContent);
-
   debug(`Found note: ${note.title} in folder: ${note.folder}`);
-
-  return {
-    id: note.id,
-    title: note.title,
-    folder: note.folder,
-    created: note.created,
-    modified: note.modified,
-    content,
-    htmlContent: note.htmlContent,
-  };
+  return toNoteDetails(note);
 }
 
 /**
@@ -357,34 +341,65 @@ export async function getNoteByFolderAndTitle(
   `;
 
   const result = await executeJxa<string>(jxaCode);
-  const notes = JSON.parse(result) as Array<{
-    id: string;
-    title: string;
-    folder: string;
-    created: string;
-    modified: string;
-    htmlContent: string;
-  }>;
+  const notes = JSON.parse(result) as RawNoteData[];
 
   if (notes.length === 0) {
     debug("Note not found");
     return null;
   }
 
-  const note = notes[0];
-  const content = htmlToMarkdown(note.htmlContent);
+  debug(`Found note in folder: ${notes[0].folder}`);
+  return toNoteDetails(notes[0]);
+}
 
-  debug(`Found note in folder: ${note.folder}`);
+/**
+ * Get all notes with full content in a single JXA call.
+ * This is much faster than calling getNoteByFolderAndTitle for each note
+ * because it avoids the JXA process spawn overhead per note.
+ *
+ * @returns Array of note details with content
+ */
+export async function getAllNotesWithContent(): Promise<NoteDetails[]> {
+  debug("Getting all notes with content (single JXA call)...");
 
-  return {
-    id: note.id,
-    title: note.title,
-    folder: note.folder,
-    created: note.created,
-    modified: note.modified,
-    content,
-    htmlContent: note.htmlContent,
-  };
+  const jxaCode = `
+    const app = Application('Notes');
+    app.includeStandardAdditions = true;
+
+    const allNotes = [];
+    const folders = app.folders();
+
+    for (const folder of folders) {
+      const folderName = folder.name();
+      const notes = folder.notes();
+
+      for (let i = 0; i < notes.length; i++) {
+        try {
+          const note = notes[i];
+          const props = note.properties();
+          allNotes.push({
+            id: note.id(),
+            title: props.name || '',
+            folder: folderName,
+            created: props.creationDate ? props.creationDate.toISOString() : '',
+            modified: props.modificationDate ? props.modificationDate.toISOString() : '',
+            htmlContent: note.body()
+          });
+        } catch (e) {
+          // Skip notes that can't be accessed
+        }
+      }
+    }
+
+    return JSON.stringify(allNotes);
+  `;
+
+  const result = await executeJxa<string>(jxaCode);
+  const notes = JSON.parse(result) as RawNoteData[];
+
+  debug(`Fetched ${notes.length} notes with content`);
+
+  return notes.map(toNoteDetails);
 }
 
 /**

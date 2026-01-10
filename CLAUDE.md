@@ -37,8 +37,10 @@ User Query → MCP Server → Search Module → Embeddings → LanceDB → Resul
 
 **Search Pipeline** (`src/search/`)
 
-- `index.ts` - Hybrid search using Reciprocal Rank Fusion (RRF) to merge vector + FTS results
+- `index.ts` - Legacy hybrid search using Reciprocal Rank Fusion (RRF)
 - `indexer.ts` - Full and incremental indexing with `indexed_at` timestamp tracking
+- `chunk-indexer.ts` - Chunk-based indexing for Parent Document Retriever pattern
+- `chunk-search.ts` - Chunk search with note deduplication (keeps best chunk per note)
 
 **Embedding Providers** (`src/embeddings/`)
 
@@ -65,7 +67,8 @@ User Query → MCP Server → Search Module → Embeddings → LanceDB → Resul
 - **Title disambiguation**: Use `Folder/Note Title` or `id:xxx` format when multiple notes share the same title
 - **Incremental indexing**: Compares `note.modified` with `record.indexed_at` to detect changes
 - **RRF fusion**: Constant `RRF_K=60` for combining search rankings
-- **Text truncation**: `truncateForEmbedding()` limits content before embedding generation
+- **Parent Document Retriever**: Long notes split into 500-char chunks with 100-char overlap for better semantic search
+- **Chunk deduplication**: Search returns best-matching chunk per note, not multiple chunks from same note
 
 ## Environment Variables
 

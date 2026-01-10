@@ -111,9 +111,33 @@ describe("updateNote", () => {
       success: true,
       note: { id: "123", title: "Test", folder: "Work" },
     });
-    vi.mocked(runJxa).mockResolvedValueOnce("ok");
+    // Mock JXA returning the new title (same as original in this case)
+    vi.mocked(runJxa).mockResolvedValueOnce(JSON.stringify({ newTitle: "Test" }));
 
-    await expect(updateNote("Test", "New Content")).resolves.toBeUndefined();
+    const result = await updateNote("Test", "New Content");
+    expect(result).toEqual({
+      originalTitle: "Test",
+      newTitle: "Test",
+      folder: "Work",
+      titleChanged: false,
+    });
+  });
+
+  it("should detect when Apple Notes renames the note", async () => {
+    vi.mocked(resolveNoteTitle).mockResolvedValueOnce({
+      success: true,
+      note: { id: "123", title: "Original Title", folder: "Work" },
+    });
+    // Mock JXA returning a different title (Apple Notes renamed it)
+    vi.mocked(runJxa).mockResolvedValueOnce(JSON.stringify({ newTitle: "New Heading" }));
+
+    const result = await updateNote("Original Title", "# New Heading\n\nContent");
+    expect(result).toEqual({
+      originalTitle: "Original Title",
+      newTitle: "New Heading",
+      folder: "Work",
+      titleChanged: true,
+    });
   });
 
   it("should include suggestions in error when multiple notes found", async () => {

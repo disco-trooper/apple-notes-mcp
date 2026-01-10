@@ -108,6 +108,27 @@ class OpenRouterError extends Error {
   }
 }
 
+/** HTTP status codes that should not be retried */
+const NON_RETRYABLE_STATUS_CODES = [400, 401, 403, 404];
+
+/** Common headers for OpenRouter API requests */
+const API_HEADERS = {
+  "Content-Type": "application/json",
+  "HTTP-Referer": "https://github.com/apple-notes-mcp",
+  "X-Title": "Apple Notes MCP",
+} as const;
+
+/**
+ * Check if an error should trigger a retry or fail immediately.
+ * Returns true if the error is non-retryable.
+ */
+function isNonRetryableError(error: unknown): boolean {
+  if (error instanceof OpenRouterError && error.statusCode) {
+    return NON_RETRYABLE_STATUS_CODES.includes(error.statusCode);
+  }
+  return false;
+}
+
 /**
  * Get embedding vector for text using OpenRouter API
  *
@@ -157,9 +178,7 @@ export async function getOpenRouterEmbedding(text: string): Promise<number[]> {
         method: "POST",
         headers: {
           Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-          "Content-Type": "application/json",
-          "HTTP-Referer": "https://github.com/apple-notes-mcp",
-          "X-Title": "Apple Notes MCP",
+          ...API_HEADERS,
         },
         body: JSON.stringify({
           model: EMBEDDING_MODEL,
@@ -224,17 +243,12 @@ export async function getOpenRouterEmbedding(text: string): Promise<number[]> {
           `Request timed out after ${OPENROUTER_TIMEOUT_MS}ms`,
           408
         );
-        // Don't throw - fall through to retry logic below
       } else {
         lastError = error instanceof Error ? error : new Error(String(error));
 
-        // Don't retry on non-retryable errors
-        if (error instanceof OpenRouterError && error.statusCode) {
-          const nonRetryable = [400, 401, 403, 404];
-          if (nonRetryable.includes(error.statusCode)) {
-            debug(`Non-retryable error (${error.statusCode}), failing immediately`);
-            throw error;
-          }
+        if (isNonRetryableError(error)) {
+          debug(`Non-retryable error, failing immediately`);
+          throw error;
         }
       }
 
@@ -282,4 +296,212 @@ export function clearEmbeddingCache(): void {
  */
 export function getEmbeddingCacheSize(): number {
   return embeddingCache.size;
+}
+
+/**
+ * Batch size for embedding requests.
+ * OpenRouter supports up to 2048 inputs per request, but 50-100 is optimal.
+ */
+const BATCH_SIZE = 50;
+
+/**
+ * Number of concurrent batch API calls.
+ * Higher values increase throughput but may hit rate limits.
+ */
+const CONCURRENT_BATCHES = 3;
+
+/**
+ * Split an array into chunks of specified size.
+ */
+function chunk<T>(array: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let i = 0; i < array.length; i += size) {
+    chunks.push(array.slice(i, i + size));
+  }
+  return chunks;
+}
+
+/**
+ * Process a single batch of texts and return embeddings.
+ * Internal helper for concurrent batch processing.
+ */
+async function processSingleBatch(
+  batchTexts: string[],
+  batchIndices: number[],
+  cacheKeys: string[],
+  results: (number[] | null)[],
+  batchNumber: number,
+  totalBatches: number
+): Promise<void> {
+  debug(`Processing batch ${batchNumber}/${totalBatches} (${batchTexts.length} texts)`);
+
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), OPENROUTER_TIMEOUT_MS * 2);
+
+    try {
+      const response = await fetch(API_URL, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+          ...API_HEADERS,
+        },
+        body: JSON.stringify({
+          model: EMBEDDING_MODEL,
+          input: batchTexts,
+          dimensions: EMBEDDING_DIMS,
+        }),
+        signal: controller.signal,
+      });
+
+      if (response.status === 429) {
+        clearTimeout(timeoutId);
+        const waitTime = getBackoffDelay(attempt, RATE_LIMIT_BACKOFF_BASE_MS);
+        debug(`Batch ${batchNumber}: Rate limited (429), waiting ${waitTime}ms`);
+        await sleep(waitTime);
+        continue;
+      }
+
+      if (!response.ok) {
+        const errorBody = await response.text();
+        throw new OpenRouterError(
+          `OpenRouter API error: ${response.status} - ${errorBody}`,
+          response.status,
+          errorBody
+        );
+      }
+
+      const data = await response.json() as {
+        data?: Array<{ embedding?: number[]; index?: number }>;
+      };
+
+      if (!data?.data || data.data.length !== batchTexts.length) {
+        throw new OpenRouterError(
+          `Invalid API response: expected ${batchTexts.length} embeddings, got ${data?.data?.length ?? 0}`,
+          response.status,
+          JSON.stringify(data)
+        );
+      }
+
+      // Store results and cache them
+      for (let j = 0; j < data.data.length; j++) {
+        const embedding = data.data[j].embedding;
+        if (!embedding) {
+          throw new OpenRouterError(
+            `Missing embedding at index ${j}`,
+            response.status,
+            JSON.stringify(data)
+          );
+        }
+
+        results[batchIndices[j]] = embedding;
+        embeddingCache.set(cacheKeys[batchIndices[j]], embedding);
+      }
+
+      return; // Success
+
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        lastError = new OpenRouterError(
+          `Batch request timed out after ${OPENROUTER_TIMEOUT_MS * 2}ms`,
+          408
+        );
+      } else {
+        lastError = error instanceof Error ? error : new Error(String(error));
+
+        if (isNonRetryableError(error)) {
+          throw error;
+        }
+      }
+
+      if (attempt < MAX_RETRIES - 1) {
+        const waitTime = getBackoffDelay(attempt);
+        debug(`Batch ${batchNumber} error: ${lastError.message}, retrying in ${waitTime}ms`);
+        await sleep(waitTime);
+      }
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  throw new OpenRouterError(
+    `Failed to get batch ${batchNumber} embeddings after ${MAX_RETRIES} attempts: ${lastError?.message}`
+  );
+}
+
+/**
+ * Get embedding vectors for multiple texts using concurrent batch API calls.
+ * Much faster than calling getOpenRouterEmbedding individually.
+ *
+ * @param texts - Array of input texts to embed
+ * @returns Promise resolving to array of embedding vectors
+ * @throws OpenRouterError if API call fails
+ */
+export async function getOpenRouterEmbeddingBatch(texts: string[]): Promise<number[][]> {
+  if (!OPENROUTER_API_KEY) {
+    throw new OpenRouterError(
+      "OPENROUTER_API_KEY environment variable is not set"
+    );
+  }
+
+  if (texts.length === 0) {
+    return [];
+  }
+
+  // Truncate all inputs and check cache
+  const truncatedTexts = texts.map(t => truncateForEmbedding(t));
+  const cacheKeys = truncatedTexts.map(t => getCacheKey(t));
+
+  // Separate cached and uncached
+  const results: (number[] | null)[] = new Array(texts.length).fill(null);
+  const uncachedIndices: number[] = [];
+  const uncachedTexts: string[] = [];
+
+  for (let i = 0; i < truncatedTexts.length; i++) {
+    const cached = embeddingCache.get(cacheKeys[i]);
+    if (cached) {
+      results[i] = cached;
+    } else {
+      uncachedIndices.push(i);
+      uncachedTexts.push(truncatedTexts[i]);
+    }
+  }
+
+  debug(`Batch: ${texts.length} total, ${uncachedIndices.length} uncached`);
+
+  if (uncachedTexts.length === 0) {
+    return results as number[][];
+  }
+
+  // Split into batches
+  const textBatches = chunk(uncachedTexts, BATCH_SIZE);
+  const indexBatches = chunk(uncachedIndices, BATCH_SIZE);
+  const totalBatches = textBatches.length;
+
+  debug(`Processing ${totalBatches} batches with ${CONCURRENT_BATCHES} concurrent requests`);
+
+  // Process batches with concurrency limit
+  const batchGroups = chunk(
+    textBatches.map((texts, i) => ({ texts, indices: indexBatches[i], batchNumber: i + 1 })),
+    CONCURRENT_BATCHES
+  );
+
+  for (const group of batchGroups) {
+    await Promise.all(
+      group.map(batch =>
+        processSingleBatch(
+          batch.texts,
+          batch.indices,
+          cacheKeys,
+          results,
+          batch.batchNumber,
+          totalBatches
+        )
+      )
+    );
+  }
+
+  return results as number[][];
 }

@@ -6,8 +6,8 @@
  * - Local HuggingFace (fallback)
  */
 
-import { getOpenRouterEmbedding, getOpenRouterDimensions } from "./openrouter.js";
-import { getLocalEmbedding, getLocalDimensions, getLocalModelName } from "./local.js";
+import { getOpenRouterEmbedding, getOpenRouterDimensions, getOpenRouterEmbeddingBatch } from "./openrouter.js";
+import { getLocalEmbedding, getLocalDimensions, getLocalModelName, getLocalEmbeddingBatch } from "./local.js";
 import { createDebugLogger } from "../utils/debug.js";
 
 // Debug logging
@@ -63,6 +63,23 @@ export async function getEmbedding(text: string): Promise<number[]> {
 }
 
 /**
+ * Generate embeddings for multiple texts in batch.
+ * Uses native batch API for both OpenRouter and local providers.
+ *
+ * @param texts - Array of texts to embed
+ * @returns Promise resolving to array of embedding vectors
+ */
+export async function getEmbeddingBatch(texts: string[]): Promise<number[][]> {
+  const provider = getProvider();
+
+  if (provider === "openrouter") {
+    return getOpenRouterEmbeddingBatch(texts);
+  } else {
+    return getLocalEmbeddingBatch(texts);
+  }
+}
+
+/**
  * Get the embedding dimensions for the current provider.
  *
  * @returns Number of dimensions in embedding vectors
@@ -100,10 +117,12 @@ export function getProviderDescription(): string {
 export {
   getOpenRouterEmbedding,
   getOpenRouterDimensions,
+  getOpenRouterEmbeddingBatch,
 } from "./openrouter.js";
 
 export {
   getLocalEmbedding,
+  getLocalEmbeddingBatch,
   getLocalDimensions,
   getLocalModelName,
   isModelLoaded,

@@ -32,10 +32,19 @@ export const ERROR_MESSAGE_MAX_LENGTH = 200;
 export const MAX_RETRIES = 3;
 export const RATE_LIMIT_BACKOFF_BASE_MS = 2000;
 
-// Indexing
-export const EMBEDDING_DELAY_MS = 300;
+// Indexing (EMBEDDING_DELAY_MS removed - not needed with batch processing)
 
 // Search tuning
 export const HYBRID_SEARCH_MIN_FETCH = 40;
 export const FOLDER_FILTER_MULTIPLIER = 3;
 export const PREVIEW_TRUNCATE_RATIO = 0.7;
+
+// Knowledge Graph
+export const DEFAULT_RELATED_NOTES_LIMIT = 10;
+export const GRAPH_TAG_WEIGHT = 0.8;
+export const GRAPH_LINK_WEIGHT = 1.0;
+export const GRAPH_SIMILAR_WEIGHT = 0.5;
+
+// Chunking settings
+export const DEFAULT_CHUNK_SIZE = 500;
+export const DEFAULT_CHUNK_OVERLAP = 100;

@@ -1,21 +1,30 @@
 # apple-notes-mcp
 
+[![npm version](https://img.shields.io/npm/v/@disco_trooper/apple-notes-mcp)](https://www.npmjs.com/package/@disco_trooper/apple-notes-mcp)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![macOS](https://img.shields.io/badge/macOS-000000?logo=apple&logoColor=white)](https://www.apple.com/macos/)
+[![Bun](https://img.shields.io/badge/Bun-000000?logo=bun&logoColor=white)](https://bun.sh)
+[![Claude](https://img.shields.io/badge/Claude-MCP-blueviolet)](https://modelcontextprotocol.io)
+
 MCP server for Apple Notes with semantic search and CRUD operations. Claude searches, reads, creates, updates, and manages your Apple Notes through natural language.
 
 ## Features
 
+- **Chunk-Based Search** - Long notes split into chunks for accurate matching (NEW!)
+- **Query Caching** - 60x faster repeated searches (NEW!)
+- **Knowledge Graph** - Tags, links, and related notes discovery (NEW!)
+- **Hybrid Search** - Vector + keyword search with Reciprocal Rank Fusion
 - **Semantic Search** - Find notes by meaning, not keywords
-- **Hybrid Search** - Combine vector and keyword search for better results
 - **Full CRUD** - Create, read, update, delete, and move notes
 - **Incremental Indexing** - Re-embed only changed notes
-- **Dual Embedding Support** - Local HuggingFace or OpenRouter API
-- **Claude Code Integration** - Works with Claude Code CLI
+- **Dual Embedding** - Local HuggingFace or OpenRouter API
 
-## Requirements
+## What's New in 1.3
 
-- macOS (uses Apple Notes via JXA)
-- [Bun](https://bun.sh) runtime
-- Apple Notes app with notes
+- **Parent Document Retriever** - Splits long notes into 500-char chunks with 100-char overlap. Searches match specific sections, returns full notes.
+- **60x faster cached queries** - Query embedding cache eliminates redundant API calls.
+- **Auto-filters Base64/encoded content** - Skips images and attachments during indexing.
+- **4-6x faster indexing** - Parallel processing and optimized chunk generation.
 
 ## Installation
 
@@ -23,7 +32,14 @@ MCP server for Apple Notes with semantic search and CRUD operations. Claude sear
 
 ```bash
 npm install -g @disco_trooper/apple-notes-mcp
+apple-notes-mcp
 ```
+
+The setup wizard guides you through:
+1. Choosing your embedding provider (local or OpenRouter)
+2. Configuring API keys if needed
+3. Setting up Claude Code integration
+4. Indexing your notes
 
 ### From source
 
@@ -31,26 +47,28 @@ npm install -g @disco_trooper/apple-notes-mcp
 git clone https://github.com/disco-trooper/apple-notes-mcp.git
 cd apple-notes-mcp
 bun install
+bun run start
 ```
+
+## Requirements
+
+- macOS (uses Apple Notes via JXA)
+- [Bun](https://bun.sh) runtime
+- Apple Notes app with notes
 
 ## Quick Start
 
-Run the setup wizard:
+Run the command after installation:
 
 ```bash
-bun run setup
+apple-notes-mcp
 ```
 
-The wizard:
-1. Chooses your embedding provider (local or OpenRouter)
-2. Configures API keys if needed
-3. Sets auto-indexing preferences
-4. Adds to Claude Code configuration
-5. Indexes your notes
+The setup wizard starts automatically on first run. Restart Claude Code after setup to use the MCP tools.
 
 ## Configuration
 
-Store configuration in `.env`:
+Configuration stored in `~/.apple-notes-mcp/.env`:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
@@ -60,6 +78,14 @@ Store configuration in `.env`:
 | `READONLY_MODE` | Block all write operations | `false` |
 | `INDEX_TTL` | Auto-reindex interval in seconds | - |
 | `DEBUG` | Enable debug logging | `false` |
+
+To reconfigure:
+
+```bash
+apple-notes-mcp setup
+# or from source:
+bun run setup
+```
 
 ### Embedding Providers
 
@@ -74,14 +100,14 @@ See [docs/models.md](docs/models.md) for model comparison.
 ### Search & Discovery
 
 #### `search-notes`
-Search notes with hybrid vector + fulltext search.
+Hybrid vector + fulltext search.
 
 ```
 query: "meeting notes from last week"
 folder: "Work"           # optional, filter by folder
-limit: 10                 # default: 20
-mode: "hybrid"            # hybrid, keyword, or semantic
-include_content: false    # include full content vs preview
+limit: 10                # default: 20
+mode: "hybrid"           # hybrid, keyword, or semantic
+include_content: false   # include full content vs preview
 ```
 
 #### `list-notes`
@@ -91,7 +117,7 @@ Count indexed notes.
 List all Apple Notes folders.
 
 #### `get-note`
-Get a note's full content by title.
+Get note content by title.
 
 ```
 title: "My Note"          # or "Work/My Note" for disambiguation
@@ -100,12 +126,14 @@ title: "My Note"          # or "Work/My Note" for disambiguation
 ### Indexing
 
 #### `index-notes`
-Index all notes for semantic search.
+Index notes for semantic search.
 
 ```
 mode: "incremental"       # incremental (default) or full
 force: false              # force reindex even if TTL hasn't expired
 ```
+
+Use `mode: "full"` to create the chunk index for better long-note search. First full index takes longer as it generates chunks, but subsequent searches run fast.
 
 #### `reindex-note`
 Re-index a single note after manual edits.
@@ -150,16 +178,65 @@ title: "My Note"
 folder: "Archive"
 ```
 
+### Knowledge Graph
+
+#### `list-tags`
+List all tags with occurrence counts.
+
+#### `search-by-tag`
+Find notes with a specific tag.
+
+```
+tag: "project"
+folder: "Work"    # optional
+limit: 20         # default: 20
+```
+
+#### `related-notes`
+Find notes related to a source note.
+
+```
+title: "My Note"
+types: ["tag", "link", "similar"]  # default: all
+limit: 10                          # default: 10
+```
+
+#### `export-graph`
+Export knowledge graph for visualization.
+
+```
+format: "json"     # json or graphml
+folder: "Work"     # optional filter
+```
+
+**Supported Formats:**
+- `json` - For custom visualization (D3.js, web apps)
+- `graphml` - For professional tools (Gephi, yEd, Cytoscape)
+
 ## Claude Code Setup
 
-### Automatic (via setup wizard)
+### Automatic (recommended)
 
-Run `bun run setup` and select "Add to Claude Code configuration".
+The setup wizard automatically adds apple-notes-mcp to Claude Code. Run `apple-notes-mcp` after installation.
 
 ### Manual
 
 Add to `~/.claude.json`:
 
+For npm installation:
+```json
+{
+  "mcpServers": {
+    "apple-notes": {
+      "command": "apple-notes-mcp",
+      "args": [],
+      "env": {}
+    }
+  }
+}
+```
+
+For source installation:
 ```json
 {
   "mcpServers": {
@@ -204,6 +281,9 @@ Ensure Apple Notes runs and contains notes. Grant automation permissions when pr
 ```bash
 # Type check
 bun run check
+
+# Run tests
+bun run test
 
 # Run with debug logging
 DEBUG=true bun run start
