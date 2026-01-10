@@ -10,7 +10,8 @@
     "dev": "bun --watch run src/index.ts",
     "check": "bun run tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
     "@clack/prompts": "^0.8.0",
@@ -27,6 +28,7 @@
   "devDependencies": {
     "@types/bun": "^1.1.0",
     "@types/turndown": "^5.0.0",
+    "@vitest/coverage-v8": "^4.0.16",
     "typescript": "^5.7.0",
     "vitest": "^4.0.16"
   },
