@@ -21,6 +21,8 @@ MCP server for Apple Notes with semantic search and CRUD operations. Claude sear
 
 ## What's New in 1.3
 
+- **Smart Refresh** - Search auto-detects note changes and reindexes if needed
+- **Batch Operations** - Delete or move multiple notes at once
 - **Parent Document Retriever** - Splits long notes into 500-char chunks with 100-char overlap. Searches match specific sections, returns full notes.
 - **60x faster cached queries** - Query embedding cache eliminates redundant API calls.
 - **Auto-filters Base64/encoded content** - Skips images and attachments during indexing.
@@ -178,6 +180,22 @@ title: "My Note"
 folder: "Archive"
 ```
 
+#### `batch-delete`
+Delete multiple notes at once.
+
+```
+titles: ["Note 1", "Note 2"]  # OR folder: "Old Project"
+confirm: true                 # required for safety
+```
+
+#### `batch-move`
+Move multiple notes to a target folder.
+
+```
+titles: ["Note 1", "Note 2"]  # OR sourceFolder: "Old"
+targetFolder: "Archive"       # required
+```
+
 ### Knowledge Graph
 
 #### `list-tags`
@@ -284,6 +302,9 @@ bun run check
 
 # Run tests
 bun run test
+
+# Run with coverage
+bun run test:coverage
 
 # Run with debug logging
 DEBUG=true bun run start
