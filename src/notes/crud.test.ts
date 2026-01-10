@@ -28,7 +28,7 @@ vi.mock("./tables.js", () => ({
 }));
 
 import { runJxa } from "run-jxa";
-import { checkReadOnly, createNote, updateNote, deleteNote, moveNote, editTable } from "./crud.js";
+import { checkReadOnly, createNote, updateNote, deleteNote, moveNote, editTable, batchDelete, batchMove } from "./crud.js";
 import { resolveNoteTitle } from "./read.js";
 import { findTables, updateTableCell } from "./tables.js";
 
@@ -288,5 +288,126 @@ describe("editTable", () => {
       0,
       "✅ Done"
     );
+  });
+});
+
+describe("batchDelete", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    delete process.env.READONLY_MODE;
+  });
+
+  it("should throw if both titles and folder provided", async () => {
+    await expect(
+      batchDelete({ titles: ["Note"], folder: "Folder" })
+    ).rejects.toThrow("Specify either titles or folder, not both");
+  });
+
+  it("should throw if neither titles nor folder provided", async () => {
+    await expect(batchDelete({})).rejects.toThrow("Specify either titles or folder");
+  });
+
+  it("should throw in readonly mode", async () => {
+    process.env.READONLY_MODE = "true";
+    await expect(batchDelete({ titles: ["Note"] })).rejects.toThrow("read-only mode");
+  });
+
+  it("should delete all notes in a folder", async () => {
+    vi.mocked(runJxa).mockResolvedValue(JSON.stringify({ deletedCount: 5 }));
+
+    const result = await batchDelete({ folder: "Old Project" });
+
+    expect(result.deleted).toBe(5);
+    expect(result.failed).toEqual([]);
+  });
+
+  it("should delete individual notes by title", async () => {
+    vi.mocked(resolveNoteTitle)
+      .mockResolvedValueOnce({ success: true, note: { id: "1", title: "Note 1", folder: "Work" } })
+      .mockResolvedValueOnce({ success: true, note: { id: "2", title: "Note 2", folder: "Work" } });
+    vi.mocked(runJxa).mockResolvedValue("ok");
+
+    const result = await batchDelete({ titles: ["Note 1", "Note 2"] });
+
+    expect(result.deleted).toBe(2);
+    expect(result.failed).toEqual([]);
+  });
+
+  it("should track failed deletions", async () => {
+    vi.mocked(resolveNoteTitle)
+      .mockResolvedValueOnce({ success: true, note: { id: "1", title: "Note 1", folder: "Work" } })
+      .mockResolvedValueOnce({ success: false, error: "Note not found" });
+    vi.mocked(runJxa).mockResolvedValue("ok");
+
+    const result = await batchDelete({ titles: ["Note 1", "Missing Note"] });
+
+    expect(result.deleted).toBe(1);
+    expect(result.failed).toEqual(["Missing Note"]);
+  });
+});
+
+describe("batchMove", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    delete process.env.READONLY_MODE;
+  });
+
+  it("should throw if targetFolder missing", async () => {
+    await expect(
+      batchMove({ titles: ["Note"], targetFolder: "" })
+    ).rejects.toThrow("targetFolder is required");
+  });
+
+  it("should throw if both titles and sourceFolder provided", async () => {
+    await expect(
+      batchMove({ titles: ["Note"], sourceFolder: "Folder", targetFolder: "Archive" })
+    ).rejects.toThrow("Specify either titles or sourceFolder, not both");
+  });
+
+  it("should throw if neither titles nor sourceFolder provided", async () => {
+    await expect(
+      batchMove({ targetFolder: "Archive" })
+    ).rejects.toThrow("Specify either titles or sourceFolder");
+  });
+
+  it("should throw in readonly mode", async () => {
+    process.env.READONLY_MODE = "true";
+    await expect(batchMove({ sourceFolder: "Temp", targetFolder: "Archive" })).rejects.toThrow("read-only mode");
+  });
+
+  it("should move all notes from source folder", async () => {
+    vi.mocked(runJxa).mockResolvedValue(JSON.stringify({ movedCount: 3 }));
+
+    const result = await batchMove({
+      sourceFolder: "Temp",
+      targetFolder: "Archive",
+    });
+
+    expect(result.moved).toBe(3);
+    expect(result.failed).toEqual([]);
+  });
+
+  it("should move individual notes by title", async () => {
+    vi.mocked(resolveNoteTitle)
+      .mockResolvedValueOnce({ success: true, note: { id: "1", title: "Note 1", folder: "Work" } })
+      .mockResolvedValueOnce({ success: true, note: { id: "2", title: "Note 2", folder: "Work" } });
+    vi.mocked(runJxa).mockResolvedValue("ok");
+
+    const result = await batchMove({ titles: ["Note 1", "Note 2"], targetFolder: "Archive" });
+
+    expect(result.moved).toBe(2);
+    expect(result.failed).toEqual([]);
+  });
+
+  it("should track failed moves", async () => {
+    vi.mocked(resolveNoteTitle)
+      .mockResolvedValueOnce({ success: true, note: { id: "1", title: "Note 1", folder: "Work" } })
+      .mockResolvedValueOnce({ success: false, error: "Note not found" });
+    vi.mocked(runJxa).mockResolvedValue("ok");
+
+    const result = await batchMove({ titles: ["Note 1", "Missing Note"], targetFolder: "Archive" });
+
+    expect(result.moved).toBe(1);
+    expect(result.failed).toEqual(["Missing Note"]);
   });
 });

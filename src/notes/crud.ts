@@ -342,3 +342,210 @@ export async function editTable(
 
   debug(`Table ${tableIndex} updated in note: "${title}"`);
 }
+
+/**
+ * Result of a batch operation.
+ */
+export interface BatchResult {
+  /** Number of notes successfully processed */
+  deleted: number;
+  /** Notes that failed to process */
+  failed: string[];
+}
+
+/**
+ * Options for batch delete.
+ */
+export interface BatchDeleteOptions {
+  /** List of note titles (supports folder/title and id:xxx formats) */
+  titles?: string[];
+  /** Delete all notes in this folder */
+  folder?: string;
+}
+
+/**
+ * Delete multiple notes at once.
+ *
+ * @param options - Either titles array OR folder name (not both)
+ * @returns BatchResult with deleted count and failed notes
+ * @throws Error if READONLY_MODE is enabled
+ * @throws Error if both titles and folder provided
+ * @throws Error if neither titles nor folder provided
+ */
+export async function batchDelete(options: BatchDeleteOptions): Promise<BatchResult> {
+  checkReadOnly();
+
+  const { titles, folder } = options;
+
+  if (titles && folder) {
+    throw new Error("Specify either titles or folder, not both");
+  }
+
+  if (!titles && !folder) {
+    throw new Error("Specify either titles or folder");
+  }
+
+  const result: BatchResult = { deleted: 0, failed: [] };
+
+  if (folder) {
+    // Delete all notes in folder via single JXA call
+    debug(`Batch deleting all notes in folder: "${folder}"`);
+
+    const escapedFolder = JSON.stringify(folder);
+    const jxaResult = await runJxa(`
+      const app = Application('Notes');
+      const folderName = ${escapedFolder};
+
+      const folders = app.folders.whose({name: folderName})();
+      if (folders.length === 0) {
+        throw new Error("Folder not found: " + folderName);
+      }
+
+      const folder = folders[0];
+      const notes = folder.notes();
+      let deletedCount = 0;
+
+      // Delete in reverse order to avoid index shifting
+      for (let i = notes.length - 1; i >= 0; i--) {
+        try {
+          notes[i].delete();
+          deletedCount++;
+        } catch (e) {
+          // Continue on individual failures
+        }
+      }
+
+      return JSON.stringify({ deletedCount });
+    `);
+
+    const { deletedCount } = JSON.parse(jxaResult as string);
+    result.deleted = deletedCount;
+  } else if (titles) {
+    // Delete individual notes
+    debug(`Batch deleting ${titles.length} notes by title`);
+
+    for (const title of titles) {
+      try {
+        await deleteNote(title);
+        result.deleted++;
+      } catch (error) {
+        result.failed.push(title);
+        debug(`Failed to delete "${title}":`, error);
+      }
+    }
+  }
+
+  debug(`Batch delete complete: ${result.deleted} deleted, ${result.failed.length} failed`);
+  return result;
+}
+
+/**
+ * Result of a batch move operation.
+ */
+export interface BatchMoveResult {
+  /** Number of notes successfully moved */
+  moved: number;
+  /** Notes that failed to move */
+  failed: string[];
+}
+
+/**
+ * Options for batch move.
+ */
+export interface BatchMoveOptions {
+  /** List of note titles (supports folder/title and id:xxx formats) */
+  titles?: string[];
+  /** Move all notes from this folder */
+  sourceFolder?: string;
+  /** Target folder (required) */
+  targetFolder: string;
+}
+
+/**
+ * Move multiple notes to a target folder.
+ *
+ * @param options - Either titles array OR sourceFolder (not both) + targetFolder
+ * @returns BatchMoveResult with moved count and failed notes
+ * @throws Error if READONLY_MODE is enabled
+ * @throws Error if both titles and sourceFolder provided
+ * @throws Error if neither titles nor sourceFolder provided
+ * @throws Error if targetFolder is empty
+ */
+export async function batchMove(options: BatchMoveOptions): Promise<BatchMoveResult> {
+  checkReadOnly();
+
+  const { titles, sourceFolder, targetFolder } = options;
+
+  if (!targetFolder) {
+    throw new Error("targetFolder is required");
+  }
+
+  if (titles && sourceFolder) {
+    throw new Error("Specify either titles or sourceFolder, not both");
+  }
+
+  if (!titles && !sourceFolder) {
+    throw new Error("Specify either titles or sourceFolder");
+  }
+
+  const result: BatchMoveResult = { moved: 0, failed: [] };
+
+  if (sourceFolder) {
+    // Move all notes from source folder via single JXA call
+    debug(`Batch moving all notes from "${sourceFolder}" to "${targetFolder}"`);
+
+    const escapedSource = JSON.stringify(sourceFolder);
+    const escapedTarget = JSON.stringify(targetFolder);
+    const jxaResult = await runJxa(`
+      const app = Application('Notes');
+      const sourceName = ${escapedSource};
+      const targetName = ${escapedTarget};
+
+      const sourceFolders = app.folders.whose({name: sourceName})();
+      if (sourceFolders.length === 0) {
+        throw new Error("Source folder not found: " + sourceName);
+      }
+
+      const targetFolders = app.folders.whose({name: targetName})();
+      if (targetFolders.length === 0) {
+        throw new Error("Target folder not found: " + targetName);
+      }
+
+      const source = sourceFolders[0];
+      const target = targetFolders[0];
+      const notes = source.notes();
+      let movedCount = 0;
+
+      // Move in reverse order to avoid index shifting
+      for (let i = notes.length - 1; i >= 0; i--) {
+        try {
+          notes[i].move({to: target});
+          movedCount++;
+        } catch (e) {
+          // Continue on individual failures
+        }
+      }
+
+      return JSON.stringify({ movedCount });
+    `);
+
+    const { movedCount } = JSON.parse(jxaResult as string);
+    result.moved = movedCount;
+  } else if (titles) {
+    // Move individual notes
+    debug(`Batch moving ${titles.length} notes to "${targetFolder}"`);
+
+    for (const title of titles) {
+      try {
+        await moveNote(title, targetFolder);
+        result.moved++;
+      } catch (error) {
+        result.failed.push(title);
+        debug(`Failed to move "${title}":`, error);
+      }
+    }
+  }
+
+  debug(`Batch move complete: ${result.moved} moved, ${result.failed.length} failed`);
+  return result;
+}
