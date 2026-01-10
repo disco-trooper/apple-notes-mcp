@@ -26,11 +26,12 @@ import { validateEnv } from "./config/env.js";
 // Import implementations
 import { getVectorStore, getChunkStore } from "./db/lancedb.js";
 import { getNoteByTitle, getAllFolders } from "./notes/read.js";
-import { createNote, updateNote, deleteNote, moveNote, editTable } from "./notes/crud.js";
+import { createNote, updateNote, deleteNote, moveNote, editTable, batchDelete, batchMove } from "./notes/crud.js";
 import { searchNotes } from "./search/index.js";
 import { indexNotes, reindexNote } from "./search/indexer.js";
 import { fullChunkIndex, hasChunkIndex } from "./search/chunk-indexer.js";
 import { searchChunks } from "./search/chunk-search.js";
+import { refreshIfNeeded } from "./search/refresh.js";
 import { listTags, searchByTag, findRelatedNotes } from "./graph/queries.js";
 import { exportGraph } from "./graph/export.js";
 
@@ -124,6 +125,24 @@ const EditTableSchema = z.object({
     value: z.string().max(10000),
   })).min(1).max(100),
 });
+
+const BatchDeleteSchema = z.object({
+  titles: z.array(z.string().max(MAX_TITLE_LENGTH)).optional(),
+  folder: z.string().max(200).optional(),
+  confirm: z.literal(true),
+}).refine(
+  (data) => (data.titles && !data.folder) || (!data.titles && data.folder),
+  { message: "Specify either titles or folder, not both" }
+);
+
+const BatchMoveSchema = z.object({
+  titles: z.array(z.string().max(MAX_TITLE_LENGTH)).optional(),
+  sourceFolder: z.string().max(200).optional(),
+  targetFolder: z.string().min(1).max(200),
+}).refine(
+  (data) => (data.titles && !data.sourceFolder) || (!data.titles && data.sourceFolder),
+  { message: "Specify either titles or sourceFolder, not both" }
+);
 
 // Knowledge Graph tool schemas
 const ListTagsSchema = z.object({});
@@ -334,6 +353,52 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ["title", "edits"],
         },
       },
+      {
+        name: "batch-delete",
+        description: "Delete multiple notes at once. Requires confirm: true for safety.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            titles: {
+              type: "array",
+              items: { type: "string" },
+              description: "Note titles to delete (supports folder/title and id:xxx formats)",
+            },
+            folder: {
+              type: "string",
+              description: "Delete ALL notes in this folder",
+            },
+            confirm: {
+              type: "boolean",
+              description: "Must be true to confirm deletion",
+            },
+          },
+          required: ["confirm"],
+        },
+      },
+      {
+        name: "batch-move",
+        description: "Move multiple notes to a target folder at once.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            titles: {
+              type: "array",
+              items: { type: "string" },
+              description: "Note titles to move (supports folder/title and id:xxx formats)",
+            },
+            sourceFolder: {
+              type: "string",
+              description: "Move ALL notes from this folder",
+            },
+            targetFolder: {
+              type: "string",
+              description: "Target folder to move notes to",
+            },
+          },
+          required: ["targetFolder"],
+        },
+      },
       // Knowledge Graph tools
       {
         name: "list-tags",
@@ -404,6 +469,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // Read tools
       case "search-notes": {
         const params = SearchNotesSchema.parse(args);
+
+        // Smart refresh: check for changes before search
+        const refreshed = await refreshIfNeeded();
+        if (refreshed) {
+          debug("Index refreshed before search");
+        }
 
         // Use chunk-based search if chunk index exists (better for long notes)
         const useChunkSearch = await hasChunkIndex();
@@ -576,6 +647,35 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const params = EditTableSchema.parse(args);
         await editTable(params.title, params.table_index, params.edits);
         return textResponse(`Updated ${params.edits.length} cell(s) in table ${params.table_index}`);
+      }
+
+      case "batch-delete": {
+        const params = BatchDeleteSchema.parse(args);
+        const result = await batchDelete({
+          titles: params.titles,
+          folder: params.folder,
+        });
+
+        let message = `Deleted ${result.deleted} notes.`;
+        if (result.failed.length > 0) {
+          message += `\nFailed to delete: ${result.failed.join(", ")}`;
+        }
+        return textResponse(message);
+      }
+
+      case "batch-move": {
+        const params = BatchMoveSchema.parse(args);
+        const result = await batchMove({
+          titles: params.titles,
+          sourceFolder: params.sourceFolder,
+          targetFolder: params.targetFolder,
+        });
+
+        let message = `Moved ${result.moved} notes to "${params.targetFolder}".`;
+        if (result.failed.length > 0) {
+          message += `\nFailed to move: ${result.failed.join(", ")}`;
+        }
+        return textResponse(message);
       }
 
       // Knowledge Graph tools
