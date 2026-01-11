@@ -7,12 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-01-11
+
 ### Added
 
-- `batch-delete` tool - delete multiple notes by titles or all notes in a folder
-- `batch-move` tool - move multiple notes by titles or all notes from a source folder
-- `purge-index` tool - clear all indexed data (useful when switching embedding models)
-- Smart refresh - auto-reindex changed notes before search
+- `batch-delete` tool - delete multiple notes by title or entire folder
+- `batch-move` tool - move multiple notes to target folder
+- `purge-index` tool - clear all indexed data for model switching or corruption recovery
+- Smart refresh - search auto-reindexes changed notes (no manual index-notes needed)
 - Test coverage reporting (`bun run test:coverage`)
 
 ## [1.3.0] - 2026-01-10
@@ -93,7 +95,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Read-only mode via `READONLY_MODE` env variable
 - Debug logging via `DEBUG` env variable
 
-[Unreleased]: https://github.com/disco-trooper/apple-notes-mcp/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/disco-trooper/apple-notes-mcp/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/disco-trooper/apple-notes-mcp/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/disco-trooper/apple-notes-mcp/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/disco-trooper/apple-notes-mcp/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/disco-trooper/apple-notes-mcp/compare/v1.0.1...v1.1.0
