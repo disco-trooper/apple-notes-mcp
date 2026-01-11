@@ -144,6 +144,10 @@ const BatchMoveSchema = z.object({
   { message: "Specify either titles or sourceFolder, not both" }
 );
 
+const PurgeIndexSchema = z.object({
+  confirm: z.literal(true),
+});
+
 // Knowledge Graph tool schemas
 const ListTagsSchema = z.object({});
 
@@ -246,6 +250,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             title: { type: "string", description: "Note title (use folder/title for disambiguation)" },
           },
           required: ["title"],
+        },
+      },
+      {
+        name: "purge-index",
+        description: "Delete all indexed data (notes and chunks). Use when switching embedding models or to fix corrupted index.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            confirm: { type: "boolean", description: "Must be true to confirm deletion" },
+          },
+          required: ["confirm"],
         },
       },
       {
@@ -552,6 +567,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const params = ReindexNoteSchema.parse(args);
         await reindexNote(params.title);
         return textResponse(`Reindexed note: "${params.title}"`);
+      }
+
+      case "purge-index": {
+        PurgeIndexSchema.parse(args);
+        const store = getVectorStore();
+        const chunkStore = getChunkStore();
+
+        await store.clear();
+        await chunkStore.clear();
+
+        return textResponse("Index purged. Run index-notes to rebuild.");
       }
 
       case "list-notes": {
