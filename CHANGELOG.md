@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-01-11
+
+### Fixed
+
+- Updated README "What's New" section for v1.5
+
 ## [1.5.0] - 2026-01-11
 
 ### Added
@@ -106,7 +112,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Read-only mode via `READONLY_MODE` env variable
 - Debug logging via `DEBUG` env variable
 
-[Unreleased]: https://github.com/disco-trooper/apple-notes-mcp/compare/v1.5.0...HEAD
+[Unreleased]: https://github.com/disco-trooper/apple-notes-mcp/compare/v1.5.1...HEAD
+[1.5.1]: https://github.com/disco-trooper/apple-notes-mcp/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/disco-trooper/apple-notes-mcp/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/disco-trooper/apple-notes-mcp/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/disco-trooper/apple-notes-mcp/compare/v1.2.0...v1.3.0
