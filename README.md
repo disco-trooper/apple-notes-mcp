@@ -10,9 +10,9 @@ MCP server for Apple Notes with semantic search and CRUD operations. Claude sear
 
 ## Features
 
-- **Chunk-Based Search** - Long notes split into chunks for accurate matching (NEW!)
-- **Query Caching** - 60x faster repeated searches (NEW!)
-- **Knowledge Graph** - Tags, links, and related notes discovery (NEW!)
+- **Chunk-Based Search** - Long notes split into chunks for accurate matching
+- **Query Caching** - 60x faster repeated searches
+- **Knowledge Graph** - Tags, links, and related notes discovery
 - **Hybrid Search** - Vector + keyword search with Reciprocal Rank Fusion
 - **Semantic Search** - Find notes by meaning, not keywords
 - **Full CRUD** - Create, read, update, delete, and move notes
