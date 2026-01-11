@@ -19,14 +19,10 @@ MCP server for Apple Notes with semantic search and CRUD operations. Claude sear
 - **Incremental Indexing** - Re-embed only changed notes
 - **Dual Embedding** - Local HuggingFace or OpenRouter API
 
-## What's New in 1.4
+## What's New in 1.5
 
-- **Smart Refresh** - Search auto-reindexes changed notes. No manual `index-notes` needed.
-- **Batch Operations** - Delete or move multiple notes by title or folder.
-- **Purge Index** - Clear all indexed data when switching models or fixing corruption.
-- **Parent Document Retriever** - Splits long notes into 500-char chunks with 100-char overlap.
-- **60x faster cached queries** - Query embedding cache eliminates redundant API calls.
-- **4-6x faster indexing** - Parallel processing and batch embeddings.
+- **List Notes with Sorting** - Sort by created, modified, or title; filter by folder; limit results.
+- **Case-Insensitive Folders** - Folder filtering now matches regardless of case.
 
 ## Installation
 
