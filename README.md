@@ -196,6 +196,17 @@ titles: ["Note 1", "Note 2"]  # OR sourceFolder: "Old"
 targetFolder: "Archive"       # required
 ```
 
+### Index Management
+
+#### `purge-index`
+Clear all indexed data. Use when switching embedding models or to fix corrupted index.
+
+```
+confirm: true   # required for safety
+```
+
+After purging, run `index-notes` to rebuild.
+
 ### Knowledge Graph
 
 #### `list-tags`

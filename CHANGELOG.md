@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `batch-delete` tool - delete multiple notes by titles or all notes in a folder
 - `batch-move` tool - move multiple notes by titles or all notes from a source folder
+- `purge-index` tool - clear all indexed data (useful when switching embedding models)
 - Smart refresh - auto-reindex changed notes before search
 - Test coverage reporting (`bun run test:coverage`)
 
