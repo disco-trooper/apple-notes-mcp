@@ -6,7 +6,7 @@ vi.mock("run-jxa", () => ({
 }));
 
 import { runJxa } from "run-jxa";
-import { getAllNotes, getNoteByTitle, getAllFolders, resolveNoteTitle } from "./read.js";
+import { getAllNotes, getNoteByTitle, getAllFolders, resolveNoteTitle, listNotes } from "./read.js";
 
 describe("getAllNotes", () => {
   beforeEach(() => {
@@ -182,5 +182,166 @@ describe("getNoteByTitle with ID prefix", () => {
 
     const note = await getNoteByTitle("id:nonexistent");
     expect(note).toBeNull();
+  });
+});
+
+describe("listNotes", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  const mockNotes = [
+    { title: "Alpha", folder: "Work", created: "2024-01-01T00:00:00Z", modified: "2024-01-10T00:00:00Z" },
+    { title: "Beta", folder: "Personal", created: "2024-01-03T00:00:00Z", modified: "2024-01-05T00:00:00Z" },
+    { title: "Gamma", folder: "Work", created: "2024-01-02T00:00:00Z", modified: "2024-01-15T00:00:00Z" },
+  ];
+
+  it("should return all notes with default sorting (modified desc)", async () => {
+    vi.mocked(runJxa).mockResolvedValueOnce(JSON.stringify(mockNotes));
+
+    const notes = await listNotes();
+    expect(notes).toHaveLength(3);
+    // Most recently modified first
+    expect(notes[0].title).toBe("Gamma");
+    expect(notes[1].title).toBe("Alpha");
+    expect(notes[2].title).toBe("Beta");
+  });
+
+  it("should sort by created date ascending", async () => {
+    vi.mocked(runJxa).mockResolvedValueOnce(JSON.stringify(mockNotes));
+
+    const notes = await listNotes({ sort_by: "created", order: "asc" });
+    expect(notes[0].title).toBe("Alpha");
+    expect(notes[1].title).toBe("Gamma");
+    expect(notes[2].title).toBe("Beta");
+  });
+
+  it("should sort by created date descending", async () => {
+    vi.mocked(runJxa).mockResolvedValueOnce(JSON.stringify(mockNotes));
+
+    const notes = await listNotes({ sort_by: "created", order: "desc" });
+    expect(notes[0].title).toBe("Beta");
+    expect(notes[1].title).toBe("Gamma");
+    expect(notes[2].title).toBe("Alpha");
+  });
+
+  it("should sort by title alphabetically", async () => {
+    vi.mocked(runJxa).mockResolvedValueOnce(JSON.stringify(mockNotes));
+
+    const notes = await listNotes({ sort_by: "title", order: "asc" });
+    expect(notes[0].title).toBe("Alpha");
+    expect(notes[1].title).toBe("Beta");
+    expect(notes[2].title).toBe("Gamma");
+  });
+
+  it("should sort by title descending", async () => {
+    vi.mocked(runJxa).mockResolvedValueOnce(JSON.stringify(mockNotes));
+
+    const notes = await listNotes({ sort_by: "title", order: "desc" });
+    expect(notes[0].title).toBe("Gamma");
+    expect(notes[1].title).toBe("Beta");
+    expect(notes[2].title).toBe("Alpha");
+  });
+
+  it("should filter by folder", async () => {
+    vi.mocked(runJxa).mockResolvedValueOnce(JSON.stringify(mockNotes));
+
+    const notes = await listNotes({ folder: "Work" });
+    expect(notes).toHaveLength(2);
+    expect(notes.every(n => n.folder === "Work")).toBe(true);
+  });
+
+  it("should apply limit", async () => {
+    vi.mocked(runJxa).mockResolvedValueOnce(JSON.stringify(mockNotes));
+
+    const notes = await listNotes({ limit: 2 });
+    expect(notes).toHaveLength(2);
+  });
+
+  it("should combine folder filter and limit", async () => {
+    vi.mocked(runJxa).mockResolvedValueOnce(JSON.stringify(mockNotes));
+
+    const notes = await listNotes({ folder: "Work", limit: 1 });
+    expect(notes).toHaveLength(1);
+    expect(notes[0].folder).toBe("Work");
+  });
+
+  it("should return empty array when folder has no notes", async () => {
+    vi.mocked(runJxa).mockResolvedValueOnce(JSON.stringify(mockNotes));
+
+    const notes = await listNotes({ folder: "NonExistent" });
+    expect(notes).toHaveLength(0);
+  });
+
+  it("should handle empty notes array", async () => {
+    vi.mocked(runJxa).mockResolvedValueOnce("[]");
+
+    const notes = await listNotes();
+    expect(notes).toHaveLength(0);
+  });
+
+  it("should handle notes with empty date strings without crashing", async () => {
+    const notesWithEmptyDates = [
+      { title: "Valid", folder: "Work", created: "2024-01-01T00:00:00Z", modified: "2024-01-10T00:00:00Z" },
+      { title: "Empty", folder: "Work", created: "", modified: "" },
+    ];
+    vi.mocked(runJxa).mockResolvedValueOnce(JSON.stringify(notesWithEmptyDates));
+
+    const notes = await listNotes();
+    expect(notes).toHaveLength(2);
+    expect(notes[0].title).toBe("Valid");
+    expect(notes[1].title).toBe("Empty");
+  });
+
+  it("should sort notes with empty dates to the end (oldest)", async () => {
+    const notesWithEmptyDates = [
+      { title: "Empty", folder: "Work", created: "", modified: "" },
+      { title: "Valid", folder: "Work", created: "2024-01-01T00:00:00Z", modified: "2024-01-10T00:00:00Z" },
+    ];
+    vi.mocked(runJxa).mockResolvedValueOnce(JSON.stringify(notesWithEmptyDates));
+
+    const notes = await listNotes({ sort_by: "modified", order: "desc" });
+    expect(notes).toHaveLength(2);
+    // Valid note should come first (most recent)
+    expect(notes[0].title).toBe("Valid");
+    // Empty date should be last (treated as oldest)
+    expect(notes[1].title).toBe("Empty");
+  });
+
+  it("should handle mixing valid and empty dates correctly", async () => {
+    const mixedDates = [
+      { title: "Recent", folder: "Work", created: "2024-03-01T00:00:00Z", modified: "2024-03-15T00:00:00Z" },
+      { title: "Empty1", folder: "Work", created: "", modified: "" },
+      { title: "Old", folder: "Work", created: "2024-01-01T00:00:00Z", modified: "2024-01-10T00:00:00Z" },
+      { title: "Empty2", folder: "Work", created: "", modified: "" },
+      { title: "Middle", folder: "Work", created: "2024-02-01T00:00:00Z", modified: "2024-02-15T00:00:00Z" },
+    ];
+    vi.mocked(runJxa).mockResolvedValueOnce(JSON.stringify(mixedDates));
+
+    const notes = await listNotes({ sort_by: "modified", order: "desc" });
+    expect(notes).toHaveLength(5);
+    // Order should be: Recent, Middle, Old, Empty1, Empty2
+    expect(notes[0].title).toBe("Recent");
+    expect(notes[1].title).toBe("Middle");
+    expect(notes[2].title).toBe("Old");
+    // Empty dates at the end (treated as epoch)
+    expect(notes[3].title).toBe("Empty1");
+    expect(notes[4].title).toBe("Empty2");
+  });
+
+  it("should sort empty dates to the beginning when sorting ascending", async () => {
+    const mixedDates = [
+      { title: "Recent", folder: "Work", created: "2024-03-01T00:00:00Z", modified: "2024-03-15T00:00:00Z" },
+      { title: "Empty", folder: "Work", created: "", modified: "" },
+      { title: "Old", folder: "Work", created: "2024-01-01T00:00:00Z", modified: "2024-01-10T00:00:00Z" },
+    ];
+    vi.mocked(runJxa).mockResolvedValueOnce(JSON.stringify(mixedDates));
+
+    const notes = await listNotes({ sort_by: "modified", order: "asc" });
+    expect(notes).toHaveLength(3);
+    // Empty date should be first (oldest when ascending)
+    expect(notes[0].title).toBe("Empty");
+    expect(notes[1].title).toBe("Old");
+    expect(notes[2].title).toBe("Recent");
   });
 });

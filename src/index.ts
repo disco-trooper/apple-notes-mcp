@@ -25,7 +25,7 @@ import { validateEnv } from "./config/env.js";
 
 // Import implementations
 import { getVectorStore, getChunkStore } from "./db/lancedb.js";
-import { getNoteByTitle, getAllFolders } from "./notes/read.js";
+import { getNoteByTitle, getAllFolders, listNotes } from "./notes/read.js";
 import { createNote, updateNote, deleteNote, moveNote, editTable, batchDelete, batchMove } from "./notes/crud.js";
 import { searchNotes } from "./search/index.js";
 import { indexNotes, reindexNote } from "./search/indexer.js";
@@ -148,6 +148,17 @@ const PurgeIndexSchema = z.object({
   confirm: z.literal(true),
 });
 
+const ListNotesSchema = z.object({
+  sort_by: z.enum(["created", "modified", "title"]).default("modified"),
+  order: z.enum(["asc", "desc"]).default("desc"),
+  limit: z.number().min(1).max(100).optional(),
+  folder: z.string().max(200).optional(),
+});
+
+/** Exported type for listNotes options - derived from Zod schema (single source of truth)
+ * Using z.input to get the input type (with optionals) rather than z.infer (output with defaults applied) */
+export type ListNotesOptions = z.input<typeof ListNotesSchema>;
+
 // Knowledge Graph tool schemas
 const ListTagsSchema = z.object({});
 
@@ -265,10 +276,29 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "list-notes",
-        description: "Count how many notes are indexed",
+        description: "List notes from Apple Notes with sorting and filtering. Without parameters, shows index statistics.",
         inputSchema: {
           type: "object",
-          properties: {},
+          properties: {
+            sort_by: {
+              type: "string",
+              enum: ["created", "modified", "title"],
+              description: "Sort by date or title (default: modified)"
+            },
+            order: {
+              type: "string",
+              enum: ["asc", "desc"],
+              description: "Sort order (default: desc)"
+            },
+            limit: {
+              type: "number",
+              description: "Max notes to return (1-100)"
+            },
+            folder: {
+              type: "string",
+              description: "Filter by folder"
+            },
+          },
           required: [],
         },
       },
@@ -581,22 +611,34 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "list-notes": {
-        const store = getVectorStore();
-        const noteCount = await store.count();
+        const params = ListNotesSchema.parse(args);
 
-        let message = `${noteCount} notes indexed.`;
+        // No parameters provided: show index statistics (backwards compatible)
+        const hasFilteringParams =
+          params.limit !== undefined ||
+          params.folder !== undefined ||
+          (args && ("sort_by" in args || "order" in args));
 
-        // Show chunk statistics if chunk index exists
-        const hasChunks = await hasChunkIndex();
-        if (hasChunks) {
-          const chunkStore = getChunkStore();
-          const chunkCount = await chunkStore.count();
-          message += ` ${chunkCount} chunks indexed for semantic search.`;
-        } else {
-          message += " Run index-notes with mode='full' to enable chunk-based search.";
+        if (!hasFilteringParams) {
+          const store = getVectorStore();
+          const noteCount = await store.count();
+          const hasChunks = await hasChunkIndex();
+
+          if (hasChunks) {
+            const chunkStore = getChunkStore();
+            const chunkCount = await chunkStore.count();
+            return textResponse(
+              `${noteCount} notes indexed. ${chunkCount} chunks indexed for semantic search.`
+            );
+          }
+
+          return textResponse(
+            `${noteCount} notes indexed. Run index-notes with mode='full' to enable chunk-based search.`
+          );
         }
 
-        return textResponse(message);
+        const notes = await listNotes(params);
+        return textResponse(JSON.stringify(notes, null, 2));
       }
 
       case "get-note": {

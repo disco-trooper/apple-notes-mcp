@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-01-11
+
+### Added
+
+- `list-notes` sorting and filtering: sort by created, modified, or title; filter by folder; limit results
+- Case-insensitive folder filtering for better usability
+
+### Fixed
+
+- Notes with empty dates no longer break sorting (treated as epoch)
+
 ## [1.4.0] - 2026-01-11
 
 ### Added
@@ -95,7 +106,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Read-only mode via `READONLY_MODE` env variable
 - Debug logging via `DEBUG` env variable
 
-[Unreleased]: https://github.com/disco-trooper/apple-notes-mcp/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/disco-trooper/apple-notes-mcp/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/disco-trooper/apple-notes-mcp/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/disco-trooper/apple-notes-mcp/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/disco-trooper/apple-notes-mcp/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/disco-trooper/apple-notes-mcp/compare/v1.1.0...v1.2.0

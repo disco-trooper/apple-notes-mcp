@@ -113,7 +113,19 @@ include_content: false   # include full content vs preview
 ```
 
 #### `list-notes`
-Count indexed notes.
+List notes with sorting and filtering. Without parameters, shows index statistics.
+
+```
+sort_by: "modified"      # created, modified, or title (default: modified)
+order: "desc"            # asc or desc (default: desc)
+limit: 10                # max notes to return (1-100)
+folder: "Work"           # filter by folder (case-insensitive)
+```
+
+**Examples:**
+- Get 5 newest notes: `{ sort_by: "created", order: "desc", limit: 5 }`
+- Recently modified: `{ sort_by: "modified", limit: 10 }`
+- Alphabetical in folder: `{ sort_by: "title", order: "asc", folder: "Projects" }`
 
 #### `list-folders`
 List all Apple Notes folders.

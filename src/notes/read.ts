@@ -434,3 +434,52 @@ export async function getAllFolders(): Promise<string[]> {
   debug(`Found ${folders.length} folders`);
   return folders;
 }
+
+// -----------------------------------------------------------------------------
+// List Notes with Sorting and Filtering
+// -----------------------------------------------------------------------------
+
+// Re-export ListNotesOptions from index.ts (derived from Zod schema - single source of truth)
+export type { ListNotesOptions } from "../index.js";
+
+// Import the type for internal use
+import type { ListNotesOptions } from "../index.js";
+
+/**
+ * List notes with sorting and filtering.
+ *
+ * @param options - Sorting and filtering options
+ * @returns Array of note metadata sorted and filtered as specified
+ */
+export async function listNotes(options: ListNotesOptions = {}): Promise<NoteInfo[]> {
+  const { sort_by = "modified", order = "desc", limit, folder } = options;
+
+  debug(`Listing notes: sort_by=${sort_by}, order=${order}, limit=${limit}, folder=${folder}`);
+
+  const allNotes = await getAllNotes();
+
+  // Filter by folder (case-insensitive for better UX)
+  const filtered = folder
+    ? allNotes.filter((n) => n.folder.toLowerCase() === folder.toLowerCase())
+    : allNotes;
+
+  filtered.sort((a, b) => {
+    let comparison: number;
+
+    if (sort_by === "title") {
+      comparison = a.title.localeCompare(b.title);
+    } else {
+      // Handle empty dates by treating them as epoch (0)
+      const aTime = a[sort_by] ? new Date(a[sort_by]).getTime() : 0;
+      const bTime = b[sort_by] ? new Date(b[sort_by]).getTime() : 0;
+      comparison = aTime - bTime;
+    }
+
+    return order === "desc" ? -comparison : comparison;
+  });
+
+  const result = limit ? filtered.slice(0, limit) : filtered;
+
+  debug(`Returning ${result.length} notes`);
+  return result;
+}

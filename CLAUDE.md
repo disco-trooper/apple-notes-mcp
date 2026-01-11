@@ -87,7 +87,7 @@ User Query → MCP Server → Search Module → Embeddings → LanceDB → Resul
 
 - `search-notes` - Hybrid/keyword/semantic search with folder filtering
 - `get-note` - Full note content by title
-- `list-notes` - Count indexed notes
+- `list-notes` - List notes with sorting (created/modified/title) and filtering
 - `list-folders` - All Apple Notes folders
 - `index-notes` - Index for semantic search (incremental/full)
 - `reindex-note` - Re-index single note
