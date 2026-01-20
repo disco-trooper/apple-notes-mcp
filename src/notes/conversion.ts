@@ -6,14 +6,34 @@ import TurndownService from "turndown";
 import { parseTable } from "./tables.js";
 
 /**
+ * Escape pipe characters in cell content for Markdown table compatibility.
+ * @param cell - Cell content to escape
+ * @returns Cell content with pipes escaped as \|
+ */
+function escapeCell(cell: string): string {
+  return cell.replace(/\|/g, "\\|");
+}
+
+/**
  * Convert table rows to Markdown table format.
+ * First row is treated as header.
+ *
+ * @param rows - 2D array of strings, where rows[0] is the header row
+ * @returns Markdown table string with header, separator, and body rows
+ *
+ * @example
+ * tableToMarkdown([["Name", "Value"], ["foo", "bar"]])
+ * // Returns:
+ * // | Name | Value |
+ * // |---|---|
+ * // | foo | bar |
  */
 function tableToMarkdown(rows: string[][]): string {
   if (rows.length === 0) return "";
 
-  const header = `| ${rows[0].join(" | ")} |`;
+  const header = `| ${rows[0].map(escapeCell).join(" | ")} |`;
   const separator = `|${rows[0].map(() => "---").join("|")}|`;
-  const body = rows.slice(1).map((row) => `| ${row.join(" | ")} |`).join("\n");
+  const body = rows.slice(1).map((row) => `| ${row.map(escapeCell).join(" | ")} |`).join("\n");
 
   return body ? `${header}\n${separator}\n${body}` : `${header}\n${separator}`;
 }

@@ -322,7 +322,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "get-tables",
-        description: "Get parsed table data from a note. Returns structured table content with rows and formatting.",
+        description: "Get parsed table data from a note. Returns { title, folder, tableCount, tables: [{ index, rows: string[][], formatting: { bold: boolean }[][] }] }",
         inputSchema: {
           type: "object",
           properties: {
