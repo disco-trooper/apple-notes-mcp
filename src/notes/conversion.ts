@@ -3,6 +3,20 @@
  */
 
 import TurndownService from "turndown";
+import { parseTable } from "./tables.js";
+
+/**
+ * Convert table rows to Markdown table format.
+ */
+function tableToMarkdown(rows: string[][]): string {
+  if (rows.length === 0) return "";
+
+  const header = `| ${rows[0].join(" | ")} |`;
+  const separator = `|${rows[0].map(() => "---").join("|")}|`;
+  const body = rows.slice(1).map((row) => `| ${row.join(" | ")} |`).join("\n");
+
+  return body ? `${header}\n${separator}\n${body}` : `${header}\n${separator}`;
+}
 
 // Initialize Turndown for HTML to Markdown conversion
 const turndownService = new TurndownService({
@@ -39,6 +53,15 @@ export function htmlToMarkdown(html: string): string {
 
   // Pre-process: handle Apple Notes specific markup
   let processed = html;
+
+  // Convert tables to Markdown BEFORE attachment processing
+  // (Tables are wrapped in <object> tags in Apple Notes)
+  const tableRegex = /<object[^>]*>[\s\S]*?<table[\s\S]*?<\/table>[\s\S]*?<\/object>/gi;
+  processed = processed.replace(tableRegex, (match) => {
+    const tableData = parseTable(match);
+    if (tableData.rows.length === 0) return match;
+    return "\n\n" + tableToMarkdown(tableData.rows) + "\n\n";
+  });
 
   // Replace attachment objects with placeholder text before Turndown
   processed = processed.replace(

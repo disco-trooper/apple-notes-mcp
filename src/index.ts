@@ -34,6 +34,7 @@ import { searchChunks } from "./search/chunk-search.js";
 import { refreshIfNeeded } from "./search/refresh.js";
 import { listTags, searchByTag, findRelatedNotes } from "./graph/queries.js";
 import { exportGraph } from "./graph/export.js";
+import { findTables, parseTable } from "./notes/tables.js";
 
 // Debug logging and error handling
 import { createDebugLogger } from "./utils/debug.js";
@@ -91,6 +92,11 @@ const ReindexNoteSchema = z.object({
 });
 
 const GetNoteSchema = z.object({
+  title: z.string().min(1).max(MAX_TITLE_LENGTH),
+  include_html: z.boolean().default(false),
+});
+
+const GetTablesSchema = z.object({
   title: z.string().min(1).max(MAX_TITLE_LENGTH),
 });
 
@@ -305,6 +311,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: "get-note",
         description: "Get full content of a note by title",
+        inputSchema: {
+          type: "object",
+          properties: {
+            title: { type: "string", description: "Note title (use folder/title for disambiguation)" },
+            include_html: { type: "boolean", description: "Include raw HTML content (default: false)" },
+          },
+          required: ["title"],
+        },
+      },
+      {
+        name: "get-tables",
+        description: "Get parsed table data from a note. Returns structured table content with rows and formatting.",
         inputSchema: {
           type: "object",
           properties: {
@@ -653,8 +671,35 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           title: note.title,
           folder: note.folder,
           content: note.content,
+          ...(params.include_html && { htmlContent: note.htmlContent }),
           created: note.created,
           modified: note.modified,
+        }, null, 2));
+      }
+
+      case "get-tables": {
+        const params = GetTablesSchema.parse(args);
+        const note = await getNoteByTitle(params.title);
+
+        if (!note) {
+          return errorResponse(`Note not found: "${params.title}"`);
+        }
+
+        const tables = findTables(note.htmlContent);
+        const parsedTables = tables.map((html, index) => ({
+          index,
+          ...parseTable(html),
+        }));
+
+        return textResponse(JSON.stringify({
+          title: note.title,
+          folder: note.folder,
+          tableCount: tables.length,
+          tables: parsedTables.map((t) => ({
+            index: t.index,
+            rows: t.rows,
+            formatting: t.formatting,
+          })),
         }, null, 2));
       }
 
