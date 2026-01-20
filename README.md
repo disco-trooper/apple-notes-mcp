@@ -19,10 +19,11 @@ MCP server for Apple Notes with semantic search and CRUD operations. Claude sear
 - **Incremental Indexing** - Re-embed only changed notes
 - **Dual Embedding** - Local HuggingFace or OpenRouter API
 
-## What's New in 1.5
+## What's New in 1.6
 
-- **List Notes with Sorting** - Sort by created, modified, or title; filter by folder; limit results.
-- **Case-Insensitive Folders** - Folder filtering now matches regardless of case.
+- **Table Support** - Tables render as Markdown instead of `[Attachment: unknown]`
+- **`get-tables` Tool** - Extract structured table data with rows and formatting
+- **Raw HTML Access** - `include_html` parameter in `get-note` for debugging
 
 ## Installation
 
@@ -131,6 +132,26 @@ Get note content by title.
 
 ```
 title: "My Note"          # or "Work/My Note" for disambiguation
+include_html: false       # include raw HTML (default: false)
+```
+
+#### `get-tables`
+Extract structured table data from a note.
+
+```
+title: "My Note"
+```
+
+Returns:
+```json
+{
+  "tableCount": 2,
+  "tables": [{
+    "index": 0,
+    "rows": [["Header1", "Header2"], ["Val1", "Val2"]],
+    "formatting": [[{"bold": true}, {"bold": true}], ...]
+  }]
+}
 ```
 
 ### Indexing
