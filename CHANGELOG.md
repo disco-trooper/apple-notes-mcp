@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-01-20
+
+### Added
+
+- **Table Markdown conversion** - Tables render as Markdown instead of `[Attachment: unknown]`
+- `get-tables` tool - Extract structured table data (rows, columns, formatting)
+- `include_html` parameter for `get-note` - Access raw Apple Notes HTML
+
+### Fixed
+
+- Pipe characters in table cells now escaped for valid Markdown output
+
 ## [1.5.1] - 2026-01-11
 
 ### Fixed
@@ -112,7 +124,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Read-only mode via `READONLY_MODE` env variable
 - Debug logging via `DEBUG` env variable
 
-[Unreleased]: https://github.com/disco-trooper/apple-notes-mcp/compare/v1.5.1...HEAD
+[Unreleased]: https://github.com/disco-trooper/apple-notes-mcp/compare/v1.6.0...HEAD
+[1.6.0]: https://github.com/disco-trooper/apple-notes-mcp/compare/v1.5.1...v1.6.0
 [1.5.1]: https://github.com/disco-trooper/apple-notes-mcp/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/disco-trooper/apple-notes-mcp/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/disco-trooper/apple-notes-mcp/compare/v1.3.0...v1.4.0
