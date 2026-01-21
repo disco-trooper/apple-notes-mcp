@@ -1,6 +1,7 @@
 # apple-notes-mcp
 
 [![npm version](https://img.shields.io/npm/v/@disco_trooper/apple-notes-mcp)](https://www.npmjs.com/package/@disco_trooper/apple-notes-mcp)
+[![npm downloads](https://img.shields.io/npm/dm/@disco_trooper/apple-notes-mcp)](https://www.npmjs.com/package/@disco_trooper/apple-notes-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![macOS](https://img.shields.io/badge/macOS-000000?logo=apple&logoColor=white)](https://www.apple.com/macos/)
 [![Bun](https://img.shields.io/badge/Bun-000000?logo=bun&logoColor=white)](https://bun.sh)
