@@ -185,7 +185,7 @@ export async function findRelatedNotes(
       if (record.id === sourceId || seen.has(record.id)) continue;
 
       const linksToSource = (record.outlinks ?? []).some(
-        (l) => l.toLowerCase() === source.title.toLowerCase()
+        (l) => l && l.toLowerCase() === source.title.toLowerCase()
       );
       if (linksToSource) {
         results.push({
