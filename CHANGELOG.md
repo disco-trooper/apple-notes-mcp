@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Streaming batch processing** - Processes embeddings in batches to reduce peak memory
 - `EMBEDDING_BATCH_SIZE` environment variable - Tune batch size for memory-constrained systems (default: 50)
 - Skipped notes reporting - Shows which notes failed to read (locked, syncing, or corrupted)
+- **Faster incremental index** - Uses batch fetch instead of individual JXA calls per note
 
 ### Fixed
 
