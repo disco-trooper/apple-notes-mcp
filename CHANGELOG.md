@@ -11,15 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Robust indexing** - Hybrid fallback strategy (single call → folder batch → note-by-note) ensures indexing completes even when some notes are problematic
-- **Streaming batch processing** - Reduces peak memory usage during indexing by processing notes in configurable batches
-- `EMBEDDING_BATCH_SIZE` environment variable - Configure batch size (default: 50) for memory-constrained systems
-- Skipped notes reporting - Index results now show which notes couldn't be read (locked, syncing, corrupted)
+- **Hybrid fallback indexing** - Falls back from single call → folder batch → note-by-note when notes fail
+- **Streaming batch processing** - Processes embeddings in batches to reduce peak memory
+- `EMBEDDING_BATCH_SIZE` environment variable - Tune batch size for memory-constrained systems (default: 50)
+- Skipped notes reporting - Shows which notes failed to read (locked, syncing, or corrupted)
 
 ### Fixed
 
-- `SyntaxError: JSON Parse error: Unexpected identifier "undefined"` - JXA can return undefined when process is killed (OOM) or notes are inaccessible; now handled gracefully with informative error messages
-- Null pointer in `related-notes` and `export-graph` when outlinks contain null values
+- `SyntaxError: JSON Parse error: Unexpected identifier "undefined"` when JXA returns undefined (OOM kill or inaccessible notes)
+- Null pointer in `related-notes` and `export-graph` for null outlinks
 
 ## [1.6.0] - 2026-01-20
 

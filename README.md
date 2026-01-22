@@ -20,11 +20,11 @@ MCP server for Apple Notes with semantic search and CRUD operations. Claude sear
 - **Incremental Indexing** - Re-embed only changed notes
 - **Dual Embedding** - Local HuggingFace or OpenRouter API
 
-## What's New in 1.6
+## What's New in 1.7
 
-- **Table Support** - Tables render as Markdown instead of `[Attachment: unknown]`
-- **`get-tables` Tool** - Extract structured table data with rows and formatting
-- **Raw HTML Access** - `include_html` parameter in `get-note` for debugging
+- **Hybrid Fallback Indexing** - Recovers from failures by falling back: single call → folder batch → note-by-note
+- **Streaming Batches** - Processes embeddings in batches to reduce peak memory
+- **Skipped Notes Reporting** - Shows which notes failed (locked, syncing, corrupted)
 
 ## Installation
 
