@@ -536,6 +536,9 @@ export async function getAllNotesWithFallback(): Promise<FallbackResult> {
   const folders = await getAllFolders();
   debug(`Trying folder-by-folder approach for ${folders.length} folders`);
 
+  // Cache for note-by-note fallback (loaded lazily only if needed)
+  let cachedNotesList: NoteInfo[] | null = null;
+
   for (const folderName of folders) {
     try {
       const folderNotes = await getNotesInFolder(folderName);
@@ -545,8 +548,11 @@ export async function getAllNotesWithFallback(): Promise<FallbackResult> {
       debug(`Folder "${folderName}" failed, falling back to note-by-note:`, folderError);
 
       // Strategy 3: Note-by-note for this folder
-      const notesList = await getAllNotes();
-      const folderNoteTitles = notesList
+      // Load notes list once and cache for subsequent folder failures
+      if (cachedNotesList === null) {
+        cachedNotesList = await getAllNotes();
+      }
+      const folderNoteTitles = cachedNotesList
         .filter((n) => n.folder === folderName)
         .map((n) => n.title);
 
