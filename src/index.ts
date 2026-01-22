@@ -612,6 +612,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           debug("Running chunk indexing for full mode...");
           const chunkResult = await fullChunkIndex();
           message += `\nChunk index: ${chunkResult.totalChunks} chunks from ${chunkResult.totalNotes} notes in ${(chunkResult.timeMs / 1000).toFixed(1)}s`;
+
+          // Report skipped notes from chunk indexing (if any that weren't already reported)
+          if (chunkResult.skippedNotes && chunkResult.skippedNotes.length > 0) {
+            const alreadyReported = new Set(result.skippedNotes ?? []);
+            const newSkipped = chunkResult.skippedNotes.filter(n => !alreadyReported.has(n));
+            if (newSkipped.length > 0) {
+              message += `\nChunk indexer skipped: ${newSkipped.join(", ")}`;
+            }
+          }
         }
 
         return textResponse(message);

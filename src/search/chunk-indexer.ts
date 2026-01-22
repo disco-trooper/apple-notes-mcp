@@ -5,7 +5,7 @@
 
 import { getEmbeddingBatch } from "../embeddings/index.js";
 import { getChunkStore, type ChunkRecord } from "../db/lancedb.js";
-import { getAllNotesWithContent, type NoteDetails } from "../notes/read.js";
+import { getAllNotesWithFallback, type NoteDetails } from "../notes/read.js";
 import { chunkText } from "../utils/chunker.js";
 import { extractMetadata } from "../graph/extract.js";
 import { DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP } from "../config/constants.js";
@@ -27,6 +27,8 @@ export interface ChunkIndexResult {
   indexed: number;
   /** Time taken in milliseconds */
   timeMs: number;
+  /** Notes that could not be read (locked, syncing, corrupted) */
+  skippedNotes?: string[];
 }
 
 /** Chunk record for internal processing - explicit types to avoid index signature issues */
@@ -115,7 +117,7 @@ export function chunkNote(note: NoteDetails): InternalChunkRecord[] {
  * Perform a full chunk index of all notes.
  *
  * Phases:
- * 1. Fetch all notes via getAllNotesWithContent
+ * 1. Fetch all notes via getAllNotesWithFallback (with hybrid fallback)
  * 2. Chunk all notes using chunkNote
  * 3. Generate embeddings in batch using getEmbeddingBatch
  * 4. Combine chunks with vectors and set indexed_at
@@ -126,10 +128,10 @@ export function chunkNote(note: NoteDetails): InternalChunkRecord[] {
 export async function fullChunkIndex(): Promise<ChunkIndexResult> {
   const startTime = Date.now();
 
-  // Phase 1: Fetch all notes
-  debug("Phase 1: Fetching all notes...");
-  const notes = await getAllNotesWithContent();
-  debug(`Fetched ${notes.length} notes`);
+  // Phase 1: Fetch all notes with hybrid fallback
+  debug("Phase 1: Fetching all notes with fallback...");
+  const { notes, skipped: skippedNotes } = await getAllNotesWithFallback();
+  debug(`Fetched ${notes.length} notes, skipped ${skippedNotes.length}`);
 
   if (notes.length === 0) {
     return {
@@ -137,6 +139,7 @@ export async function fullChunkIndex(): Promise<ChunkIndexResult> {
       totalChunks: 0,
       indexed: 0,
       timeMs: Date.now() - startTime,
+      skippedNotes: skippedNotes.length > 0 ? skippedNotes : undefined,
     };
   }
 
@@ -187,6 +190,7 @@ export async function fullChunkIndex(): Promise<ChunkIndexResult> {
     totalChunks: allChunks.length,
     indexed: completeChunks.length,
     timeMs,
+    skippedNotes: skippedNotes.length > 0 ? skippedNotes : undefined,
   };
 }
 
