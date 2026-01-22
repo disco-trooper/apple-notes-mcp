@@ -10,11 +10,8 @@
 import { getEmbedding, getEmbeddingBatch } from "../embeddings/index.js";
 import { getVectorStore, type NoteRecord } from "../db/lancedb.js";
 import {
-  getAllNotes,
   getAllNotesWithFallback,
-  getNoteByFolderAndTitle,
   getNoteByTitle,
-  type NoteInfo
 } from "../notes/read.js";
 import { createDebugLogger } from "../utils/debug.js";
 import { truncateForEmbedding } from "../utils/text.js";
@@ -229,6 +226,7 @@ export async function fullIndex(): Promise<IndexResult> {
 /**
  * Perform incremental indexing.
  * Only processes notes that have changed since last index.
+ * Uses batch fetch (getAllNotesWithFallback) instead of individual JXA calls.
  */
 export async function incrementalIndex(): Promise<IndexResult> {
   const startTime = Date.now();
@@ -236,11 +234,7 @@ export async function incrementalIndex(): Promise<IndexResult> {
 
   const store = getVectorStore();
 
-  // Get all notes from Apple Notes
-  const currentNotes = await getAllNotes();
-  debug(`Found ${currentNotes.length} notes in Apple Notes`);
-
-  // Get existing indexed notes
+  // Get existing indexed notes first
   let existingRecords: NoteRecord[];
   try {
     existingRecords = await store.getAll();
@@ -250,29 +244,34 @@ export async function incrementalIndex(): Promise<IndexResult> {
     return fullIndex();
   }
 
+  // Phase 1: Fetch ALL notes with content in batch (hybrid fallback)
+  debug("Phase 1: Fetching all notes with fallback...");
+  const { notes: allNotesWithContent, skipped: skippedNotes } = await getAllNotesWithFallback();
+  debug(`Fetched ${allNotesWithContent.length} notes, skipped ${skippedNotes.length}`);
+
   // Build lookup maps
-  const existingByTitle = new Map<string, NoteRecord>();
+  const existingByKey = new Map<string, NoteRecord>();
   for (const record of existingRecords) {
     const key = `${record.folder}/${record.title}`;
-    existingByTitle.set(key, record);
+    existingByKey.set(key, record);
   }
 
-  const currentByTitle = new Map<string, NoteInfo>();
-  for (const note of currentNotes) {
+  const currentByKey = new Map<string, typeof allNotesWithContent[0]>();
+  for (const note of allNotesWithContent) {
     const key = `${note.folder}/${note.title}`;
-    currentByTitle.set(key, note);
+    currentByKey.set(key, note);
   }
 
   // Determine what needs to be done
-  const toAdd: NoteInfo[] = [];
-  const toUpdate: NoteInfo[] = [];
+  const toAdd: typeof allNotesWithContent = [];
+  const toUpdate: typeof allNotesWithContent = [];
   const toDelete: string[] = [];
   const toSkip: string[] = [];
 
   // Check current notes
-  for (const note of currentNotes) {
+  for (const note of allNotesWithContent) {
     const key = `${note.folder}/${note.title}`;
-    const existing = existingByTitle.get(key);
+    const existing = existingByKey.get(key);
 
     if (!existing) {
       toAdd.push(note);
@@ -290,8 +289,8 @@ export async function incrementalIndex(): Promise<IndexResult> {
   }
 
   // Check for deleted notes
-  for (const [key] of existingByTitle) {
-    if (!currentByTitle.has(key)) {
+  for (const [key] of existingByKey) {
+    if (!currentByKey.has(key)) {
       toDelete.push(key);
     }
   }
@@ -299,39 +298,26 @@ export async function incrementalIndex(): Promise<IndexResult> {
   debug(`Incremental: add=${toAdd.length}, update=${toUpdate.length}, delete=${toDelete.length}, skip=${toSkip.length}`);
 
   let errors = 0;
-  const failedNotes: string[] = [];
+  const failedNotes: string[] = [...skippedNotes]; // Include skipped notes from fallback
 
-  // Process additions and updates in batch
+  // Process additions and updates - notes already have content!
   const toProcess = [...toAdd, ...toUpdate];
 
   if (toProcess.length > 0) {
-    // Phase 1: Fetch all note content
-    debug(`Phase 1: Fetching ${toProcess.length} notes content...`);
+    // Phase 2: Prepare notes for embedding (content already fetched)
+    debug(`Phase 2: Preparing ${toProcess.length} notes...`);
     const preparedNotes: PreparedNote[] = [];
 
-    for (const noteInfo of toProcess) {
-      try {
-        const noteDetails = await getNoteByFolderAndTitle(noteInfo.folder, noteInfo.title);
-        if (!noteDetails) {
-          failedNotes.push(`${noteInfo.folder}/${noteInfo.title}`);
-          errors++;
-          continue;
-        }
-
-        const prepared = prepareNoteForEmbedding(noteDetails);
-        if (prepared) {
-          preparedNotes.push(prepared);
-        }
-      } catch (error) {
-        debug(`Error fetching ${noteInfo.title}:`, error);
-        failedNotes.push(`${noteInfo.folder}/${noteInfo.title}`);
-        errors++;
+    for (const noteDetails of toProcess) {
+      const prepared = prepareNoteForEmbedding(noteDetails);
+      if (prepared) {
+        preparedNotes.push(prepared);
       }
     }
 
     if (preparedNotes.length > 0) {
-      // Phase 2: Generate embeddings in batch
-      debug(`Phase 2: Generating ${preparedNotes.length} embeddings in batch...`);
+      // Phase 3: Generate embeddings in batch
+      debug(`Phase 3: Generating ${preparedNotes.length} embeddings in batch...`);
       const textsToEmbed = preparedNotes.map(n => n.truncatedContent);
 
       let vectors: number[][];
@@ -342,8 +328,8 @@ export async function incrementalIndex(): Promise<IndexResult> {
         throw error;
       }
 
-      // Phase 3: Update database
-      debug("Phase 3: Updating database...");
+      // Phase 4: Update database
+      debug("Phase 4: Updating database...");
       const indexedAt = new Date().toISOString();
 
       for (let i = 0; i < preparedNotes.length; i++) {
@@ -386,7 +372,7 @@ export async function incrementalIndex(): Promise<IndexResult> {
   debug(`Incremental index complete: ${timeMs}ms`);
 
   return {
-    total: currentNotes.length,
+    total: allNotesWithContent.length,
     indexed: toAdd.length + toUpdate.length,
     errors,
     timeMs,
@@ -397,6 +383,7 @@ export async function incrementalIndex(): Promise<IndexResult> {
       skipped: toSkip.length,
     },
     failedNotes: failedNotes.length > 0 ? failedNotes : undefined,
+    skippedNotes: skippedNotes.length > 0 ? skippedNotes : undefined,
   };
 }
 
