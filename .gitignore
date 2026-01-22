@@ -34,3 +34,8 @@ coverage/
 
 # Claude Code
 .claude/
+
+# Temporary files
+TRASH/
+TRASH-FILES.md
+docs/plans/
