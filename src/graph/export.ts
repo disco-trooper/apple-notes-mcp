@@ -66,6 +66,9 @@ export async function exportGraph(options: ExportOptions): Promise<GraphData | s
   // Add link edges
   for (const record of records) {
     for (const linkTitle of record.outlinks ?? []) {
+      // Skip null/undefined links
+      if (!linkTitle) continue;
+
       const target = records.find(r => r.title.toLowerCase() === linkTitle.toLowerCase());
       if (target && nodeIds.has(target.id)) {
         edges.push({

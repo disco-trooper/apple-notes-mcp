@@ -15,7 +15,7 @@ vi.mock("../db/lancedb.js", () => ({
 }));
 
 vi.mock("../notes/read.js", () => ({
-  getAllNotesWithContent: vi.fn(),
+  getAllNotesWithFallback: vi.fn(),
 }));
 
 vi.mock("../utils/debug.js", () => ({
@@ -26,7 +26,7 @@ vi.mock("../utils/debug.js", () => ({
 import { chunkNote, fullChunkIndex, hasChunkIndex } from "./chunk-indexer.js";
 import { getEmbeddingBatch } from "../embeddings/index.js";
 import { getChunkStore } from "../db/lancedb.js";
-import { getAllNotesWithContent } from "../notes/read.js";
+import { getAllNotesWithFallback } from "../notes/read.js";
 
 describe("chunk-indexer", () => {
   beforeEach(() => {
@@ -215,7 +215,7 @@ describe("chunk-indexer", () => {
       ];
 
       const mockIndexChunks = vi.fn();
-      (getAllNotesWithContent as Mock).mockResolvedValue(mockNotes);
+      (getAllNotesWithFallback as Mock).mockResolvedValue({ notes: mockNotes, skipped: [] });
       (getEmbeddingBatch as Mock).mockResolvedValue(mockVectors);
       (getChunkStore as Mock).mockReturnValue({
         indexChunks: mockIndexChunks,
@@ -225,7 +225,7 @@ describe("chunk-indexer", () => {
       const result = await fullChunkIndex();
 
       // Verify all notes were fetched
-      expect(getAllNotesWithContent).toHaveBeenCalledOnce();
+      expect(getAllNotesWithFallback).toHaveBeenCalledOnce();
 
       // Verify embeddings were generated for chunks
       expect(getEmbeddingBatch).toHaveBeenCalledOnce();
@@ -256,7 +256,7 @@ describe("chunk-indexer", () => {
     });
 
     it("handles empty note list", async () => {
-      (getAllNotesWithContent as Mock).mockResolvedValue([]);
+      (getAllNotesWithFallback as Mock).mockResolvedValue({ notes: [], skipped: [] });
       const mockIndexChunks = vi.fn();
       (getChunkStore as Mock).mockReturnValue({
         indexChunks: mockIndexChunks,
@@ -299,7 +299,7 @@ describe("chunk-indexer", () => {
       ];
 
       const mockIndexChunks = vi.fn();
-      (getAllNotesWithContent as Mock).mockResolvedValue(mockNotes);
+      (getAllNotesWithFallback as Mock).mockResolvedValue({ notes: mockNotes, skipped: [] });
       (getEmbeddingBatch as Mock).mockResolvedValue([[0.1, 0.2, 0.3]]);
       (getChunkStore as Mock).mockReturnValue({
         indexChunks: mockIndexChunks,

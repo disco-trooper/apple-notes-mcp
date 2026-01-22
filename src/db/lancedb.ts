@@ -44,6 +44,7 @@ export type { SearchResult };
 // VectorStore interface for future extensibility
 export interface VectorStore {
   index(records: NoteRecord[]): Promise<void>;
+  addRecords(records: NoteRecord[]): Promise<void>;
   update(record: NoteRecord): Promise<void>;
   delete(title: string): Promise<void>;
   deleteByFolderAndTitle(folder: string, title: string): Promise<void>;
@@ -312,6 +313,17 @@ export class LanceDBStore implements VectorStore {
       tags: Array.isArray(row.tags) ? row.tags : Array.from(row.tags as Iterable<string>),
       outlinks: Array.isArray(row.outlinks) ? row.outlinks : Array.from(row.outlinks as Iterable<string>),
     }));
+  }
+
+  /**
+   * Append records to existing table (for streaming batch inserts).
+   * Unlike index(), this doesn't drop the table - it adds to existing data.
+   */
+  async addRecords(records: NoteRecord[]): Promise<void> {
+    if (records.length === 0) return;
+    const table = await this.ensureTable();
+    await table.add(records);
+    debug(`Added ${records.length} records`);
   }
 
   async count(): Promise<number> {

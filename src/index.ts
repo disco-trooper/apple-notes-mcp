@@ -601,11 +601,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
         }
 
+        // Report skipped notes (locked, syncing, or corrupted)
+        if (result.skippedNotes && result.skippedNotes.length > 0) {
+          message += `\n\nSkipped notes (could not read - may be locked, syncing, or corrupted):\n${result.skippedNotes.map(n => `  - ${n}`).join("\n")}`;
+          message += `\nTip: Check these notes in Apple Notes app. Locked notes can be unlocked, syncing notes will be available after sync completes.`;
+        }
+
         // Run chunk indexing for full mode (for semantic search on long notes)
         if (params.mode === "full") {
           debug("Running chunk indexing for full mode...");
           const chunkResult = await fullChunkIndex();
           message += `\nChunk index: ${chunkResult.totalChunks} chunks from ${chunkResult.totalNotes} notes in ${(chunkResult.timeMs / 1000).toFixed(1)}s`;
+
+          // Report skipped notes from chunk indexing (if any that weren't already reported)
+          if (chunkResult.skippedNotes && chunkResult.skippedNotes.length > 0) {
+            const alreadyReported = new Set(result.skippedNotes ?? []);
+            const newSkipped = chunkResult.skippedNotes.filter(n => !alreadyReported.has(n));
+            if (newSkipped.length > 0) {
+              message += `\nChunk indexer skipped: ${newSkipped.join(", ")}`;
+            }
+          }
         }
 
         return textResponse(message);

@@ -48,3 +48,21 @@ export const GRAPH_SIMILAR_WEIGHT = 0.5;
 // Chunking settings
 export const DEFAULT_CHUNK_SIZE = 500;
 export const DEFAULT_CHUNK_OVERLAP = 100;
+
+// Batch processing
+export const DEFAULT_EMBEDDING_BATCH_SIZE = 50;
+
+/**
+ * Get embedding batch size from environment or use default.
+ * Lower values reduce peak memory usage but increase processing time.
+ */
+export function getEmbeddingBatchSize(): number {
+  const envValue = process.env.EMBEDDING_BATCH_SIZE;
+  if (envValue) {
+    const parsed = parseInt(envValue, 10);
+    if (!isNaN(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
+  return DEFAULT_EMBEDDING_BATCH_SIZE;
+}
