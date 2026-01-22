@@ -353,6 +353,78 @@ export async function getNoteByFolderAndTitle(
 }
 
 /**
+ * Get all notes in a specific folder with full content.
+ * Used as fallback when getAllNotesWithContent fails on the whole dataset.
+ *
+ * @param folderName - The folder name to fetch notes from
+ * @returns Array of note details with content from that folder
+ */
+export async function getNotesInFolder(folderName: string): Promise<NoteDetails[]> {
+  debug(`Getting notes from folder: ${folderName}`);
+
+  const escapedFolder = JSON.stringify(folderName);
+
+  const jxaCode = `
+    const app = Application('Notes');
+    app.includeStandardAdditions = true;
+
+    const targetFolder = ${escapedFolder};
+    const allNotes = [];
+    const folders = app.folders();
+
+    for (const folder of folders) {
+      if (folder.name() !== targetFolder) continue;
+
+      const notes = folder.notes();
+
+      for (let i = 0; i < notes.length; i++) {
+        try {
+          const note = notes[i];
+          const props = note.properties();
+
+          // Get body with fallback for undefined/null
+          let htmlContent = '';
+          try {
+            const body = note.body();
+            htmlContent = (body !== undefined && body !== null) ? body : '';
+          } catch (bodyErr) {
+            // Body access failed (locked note, sync issue, etc.)
+            htmlContent = '';
+          }
+
+          allNotes.push({
+            id: note.id(),
+            title: props.name || '',
+            folder: targetFolder,
+            created: props.creationDate ? props.creationDate.toISOString() : '',
+            modified: props.modificationDate ? props.modificationDate.toISOString() : '',
+            htmlContent: htmlContent
+          });
+        } catch (e) {
+          // Skip notes that can't be accessed
+        }
+      }
+    }
+
+    return JSON.stringify(allNotes);
+  `;
+
+  const result = await executeJxa<string>(jxaCode);
+
+  // Validate JXA result before parsing
+  if (result === undefined || result === null) {
+    debug(`JXA returned undefined/null for folder: ${folderName}`);
+    throw new Error(`Failed to read notes from folder "${folderName}" (JXA returned no data).`);
+  }
+
+  const notes = JSON.parse(result) as RawNoteData[];
+
+  debug(`Fetched ${notes.length} notes from folder: ${folderName}`);
+
+  return notes.map(toNoteDetails);
+}
+
+/**
  * Get all notes with full content in a single JXA call.
  * This is much faster than calling getNoteByFolderAndTitle for each note
  * because it avoids the JXA process spawn overhead per note.
@@ -377,13 +449,24 @@ export async function getAllNotesWithContent(): Promise<NoteDetails[]> {
         try {
           const note = notes[i];
           const props = note.properties();
+
+          // Get body with fallback for undefined/null
+          let htmlContent = '';
+          try {
+            const body = note.body();
+            htmlContent = (body !== undefined && body !== null) ? body : '';
+          } catch (bodyErr) {
+            // Body access failed (locked note, sync issue, etc.)
+            htmlContent = '';
+          }
+
           allNotes.push({
             id: note.id(),
             title: props.name || '',
             folder: folderName,
             created: props.creationDate ? props.creationDate.toISOString() : '',
             modified: props.modificationDate ? props.modificationDate.toISOString() : '',
-            htmlContent: note.body()
+            htmlContent: htmlContent
           });
         } catch (e) {
           // Skip notes that can't be accessed
@@ -395,11 +478,96 @@ export async function getAllNotesWithContent(): Promise<NoteDetails[]> {
   `;
 
   const result = await executeJxa<string>(jxaCode);
+
+  // Validate JXA result before parsing
+  if (result === undefined || result === null) {
+    debug("JXA returned undefined/null - possible causes: OOM, process killed, Apple Notes unavailable");
+    throw new Error(
+      "Failed to read notes from Apple Notes (JXA returned no data). " +
+      "Possible causes: out of memory, process interrupted, or Apple Notes is not responding. " +
+      "Try: 1) Close other apps to free memory, 2) Restart Apple Notes, 3) Run index-notes again."
+    );
+  }
+
   const notes = JSON.parse(result) as RawNoteData[];
 
   debug(`Fetched ${notes.length} notes with content`);
 
   return notes.map(toNoteDetails);
+}
+
+/** Result type for getAllNotesWithFallback */
+export interface FallbackResult {
+  /** Successfully fetched notes */
+  notes: NoteDetails[];
+  /** List of skipped notes (folder/title format) that couldn't be read */
+  skipped: string[];
+}
+
+/**
+ * Get all notes with hybrid fallback strategy for robustness.
+ *
+ * Strategy:
+ * 1. Try single JXA call (fastest)
+ * 2. On failure, try folder-by-folder
+ * 3. On folder failure, try note-by-note within that folder
+ *
+ * This ensures indexing completes even when some notes are problematic
+ * (locked, syncing, corrupted).
+ *
+ * @returns Notes and list of skipped notes
+ */
+export async function getAllNotesWithFallback(): Promise<FallbackResult> {
+  debug("Getting all notes with fallback strategy...");
+
+  const allNotes: NoteDetails[] = [];
+  const skipped: string[] = [];
+
+  // Strategy 1: Try single JXA call (fastest)
+  try {
+    const notes = await getAllNotesWithContent();
+    debug(`Single JXA call succeeded: ${notes.length} notes`);
+    return { notes, skipped: [] };
+  } catch (singleCallError) {
+    debug("Single JXA call failed, falling back to folder-by-folder:", singleCallError);
+  }
+
+  // Strategy 2: Folder-by-folder
+  const folders = await getAllFolders();
+  debug(`Trying folder-by-folder approach for ${folders.length} folders`);
+
+  for (const folderName of folders) {
+    try {
+      const folderNotes = await getNotesInFolder(folderName);
+      allNotes.push(...folderNotes);
+      debug(`Folder "${folderName}": ${folderNotes.length} notes`);
+    } catch (folderError) {
+      debug(`Folder "${folderName}" failed, falling back to note-by-note:`, folderError);
+
+      // Strategy 3: Note-by-note for this folder
+      const notesList = await getAllNotes();
+      const folderNoteTitles = notesList
+        .filter((n) => n.folder === folderName)
+        .map((n) => n.title);
+
+      for (const noteTitle of folderNoteTitles) {
+        try {
+          const note = await getNoteByFolderAndTitle(folderName, noteTitle);
+          if (note) {
+            allNotes.push(note);
+          } else {
+            skipped.push(`${folderName}/${noteTitle}`);
+          }
+        } catch (noteError) {
+          debug(`Skipping problematic note: ${folderName}/${noteTitle}`, noteError);
+          skipped.push(`${folderName}/${noteTitle}`);
+        }
+      }
+    }
+  }
+
+  debug(`Fallback complete: ${allNotes.length} notes, ${skipped.length} skipped`);
+  return { notes: allNotes, skipped };
 }
 
 /**

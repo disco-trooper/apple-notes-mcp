@@ -601,6 +601,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
         }
 
+        // Report skipped notes (locked, syncing, or corrupted)
+        if (result.skippedNotes && result.skippedNotes.length > 0) {
+          message += `\n\nSkipped notes (could not read - may be locked, syncing, or corrupted):\n${result.skippedNotes.map(n => `  - ${n}`).join("\n")}`;
+          message += `\nTip: Check these notes in Apple Notes app. Locked notes can be unlocked, syncing notes will be available after sync completes.`;
+        }
+
         // Run chunk indexing for full mode (for semantic search on long notes)
         if (params.mode === "full") {
           debug("Running chunk indexing for full mode...");

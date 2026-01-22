@@ -9,11 +9,18 @@
 
 import { getEmbedding, getEmbeddingBatch } from "../embeddings/index.js";
 import { getVectorStore, type NoteRecord } from "../db/lancedb.js";
-import { getAllNotes, getAllNotesWithContent, getNoteByFolderAndTitle, getNoteByTitle, type NoteInfo } from "../notes/read.js";
+import {
+  getAllNotes,
+  getAllNotesWithFallback,
+  getNoteByFolderAndTitle,
+  getNoteByTitle,
+  type NoteInfo
+} from "../notes/read.js";
 import { createDebugLogger } from "../utils/debug.js";
 import { truncateForEmbedding } from "../utils/text.js";
 import { NoteNotFoundError } from "../errors/index.js";
 import { extractMetadata } from "../graph/extract.js";
+import { getEmbeddingBatchSize } from "../config/constants.js";
 
 /**
  * Extract note title from folder/title key.
@@ -47,6 +54,8 @@ export interface IndexResult {
   };
   /** List of notes that failed to index (for debugging) */
   failedNotes?: string[];
+  /** Notes skipped during fetch (locked, syncing, corrupted) */
+  skippedNotes?: string[];
 }
 
 /**
@@ -118,59 +127,102 @@ function buildNoteRecord(
 }
 
 /**
+ * Split array into chunks of specified size.
+ */
+function chunks<T>(array: T[], size: number): T[][] {
+  const result: T[][] = [];
+  for (let i = 0; i < array.length; i += size) {
+    result.push(array.slice(i, i + size));
+  }
+  return result;
+}
+
+/**
  * Perform full reindexing of all notes.
  * Drops existing index and rebuilds from scratch.
- * Uses single JXA call + batch embedding for maximum speed.
+ *
+ * Uses:
+ * - Hybrid fallback for JXA fetch (single call → folder → note-by-note)
+ * - Streaming batch embedding (process & store in chunks to reduce memory)
  */
 export async function fullIndex(): Promise<IndexResult> {
   const startTime = Date.now();
   debug("Starting full index...");
 
-  // Phase 1: Fetch all notes with content in single JXA call
-  debug("Phase 1: Fetching all notes with content (single JXA call)...");
-  const allNotes = await getAllNotesWithContent();
-  debug(`Fetched ${allNotes.length} notes from Apple Notes`);
+  // Phase 1: Fetch all notes with hybrid fallback
+  debug("Phase 1: Fetching all notes (with fallback)...");
+  const { notes: allNotes, skipped: skippedNotes } = await getAllNotesWithFallback();
+  debug(`Fetched ${allNotes.length} notes, ${skippedNotes.length} skipped`);
 
   // Filter empty notes and prepare for embedding
   const preparedNotes = allNotes
-    .map(prepareNoteForEmbedding)
+    .map((note) => prepareNoteForEmbedding(note))
     .filter((note): note is PreparedNote => note !== null);
 
   debug(`Prepared ${preparedNotes.length} notes for embedding`);
 
-  // Phase 2: Generate embeddings in batch (with concurrent API calls)
-  debug("Phase 2: Generating embeddings in batch...");
-  const textsToEmbed = preparedNotes.map(n => n.truncatedContent);
+  const store = getVectorStore();
 
-  let vectors: number[][];
-  try {
-    vectors = await getEmbeddingBatch(textsToEmbed);
-  } catch (error) {
-    debug("Batch embedding failed:", error);
-    throw error;
+  // Phase 2: Clear existing index
+  debug("Phase 2: Clearing existing index...");
+  await store.clear();
+
+  // Phase 3: Stream process in batches
+  const batchSize = getEmbeddingBatchSize();
+  debug(`Phase 3: Processing ${preparedNotes.length} notes in batches of ${batchSize}...`);
+
+  const batches = chunks(preparedNotes, batchSize);
+  const indexedAt = new Date().toISOString();
+  let totalIndexed = 0;
+  let isFirstBatch = true;
+
+  for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
+    const batch = batches[batchIdx];
+    debug(`Batch ${batchIdx + 1}/${batches.length}: ${batch.length} notes`);
+
+    // Generate embeddings for this batch
+    const textsToEmbed = batch.map((n) => n.truncatedContent);
+    let vectors: number[][];
+    try {
+      vectors = await getEmbeddingBatch(textsToEmbed);
+    } catch (error) {
+      debug(`Batch ${batchIdx + 1} embedding failed:`, error);
+      throw error;
+    }
+
+    // Build records
+    const records = batch.map((note, i) =>
+      buildNoteRecord(note, vectors[i], indexedAt)
+    );
+
+    // Store immediately (first batch creates table, subsequent append)
+    if (isFirstBatch) {
+      await store.index(records);
+      isFirstBatch = false;
+    } else {
+      await store.addRecords(records);
+    }
+
+    totalIndexed += records.length;
+    debug(`Batch ${batchIdx + 1} stored, total: ${totalIndexed}`);
   }
 
-  debug(`Generated ${vectors.length} embeddings`);
-
-  // Phase 3: Build records and store
-  debug("Phase 3: Storing in database...");
-  const indexedAt = new Date().toISOString();
-  const records = preparedNotes.map((note, i) =>
-    buildNoteRecord(note, vectors[i], indexedAt)
-  );
-
-  const store = getVectorStore();
-  await store.index(records);
+  // Phase 4: Rebuild FTS index (once at end)
+  debug("Phase 4: Rebuilding FTS index...");
+  if (totalIndexed > 0) {
+    await store.rebuildFtsIndex();
+  }
 
   const timeMs = Date.now() - startTime;
-  const skipped = allNotes.length - preparedNotes.length;
-  debug(`Full index complete: ${records.length} indexed, ${skipped} empty/skipped, ${timeMs}ms`);
+  const emptySkipped = allNotes.length - preparedNotes.length;
+  debug(`Full index complete: ${totalIndexed} indexed, ${emptySkipped} empty, ${skippedNotes.length} fetch-skipped, ${timeMs}ms`);
 
   return {
-    total: allNotes.length,
-    indexed: records.length,
+    total: allNotes.length + skippedNotes.length,
+    indexed: totalIndexed,
     errors: 0,
     timeMs,
+    skippedNotes: skippedNotes.length > 0 ? skippedNotes : undefined,
   };
 }
 

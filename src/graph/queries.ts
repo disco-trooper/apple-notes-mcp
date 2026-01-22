@@ -158,6 +158,9 @@ export async function findRelatedNotes(
   // Find by outlinks (notes this note links to)
   if (types.includes("link")) {
     for (const linkTitle of source.outlinks ?? []) {
+      // Skip null/undefined links
+      if (!linkTitle) continue;
+
       const linked = allRecords.find(
         (r) =>
           r.title.toLowerCase() === linkTitle.toLowerCase() &&

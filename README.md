@@ -77,6 +77,7 @@ Configuration stored in `~/.apple-notes-mcp/.env`:
 | `EMBEDDING_DIMS` | Embedding dimensions | `4096` |
 | `READONLY_MODE` | Block all write operations | `false` |
 | `INDEX_TTL` | Auto-reindex interval in seconds | - |
+| `EMBEDDING_BATCH_SIZE` | Batch size for embedding generation | `50` |
 | `DEBUG` | Enable debug logging | `false` |
 
 To reconfigure:
@@ -334,6 +335,21 @@ Run `index-notes` to update the search index. Use `mode: full` if incremental mi
 
 ### JXA errors
 Ensure Apple Notes runs and contains notes. Grant automation permissions when prompted.
+
+### "JSON Parse error: Unexpected identifier undefined"
+This usually means the indexing process ran out of memory. Try:
+1. Close other applications to free memory
+2. Set `EMBEDDING_BATCH_SIZE=25` in `.env` to reduce memory usage
+3. Restart Apple Notes app
+4. Run `index-notes` again
+
+### Skipped notes during indexing
+Some notes may be skipped if they are:
+- **Locked** - Unlock them in Apple Notes if you want them indexed
+- **Syncing** - Wait for iCloud sync to complete, then reindex
+- **Corrupted** - Try copying content to a new note and deleting the old one
+
+The indexer will report which notes were skipped and continue with the rest.
 
 ## Development
 
