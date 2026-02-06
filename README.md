@@ -187,8 +187,8 @@ For large vaults, prefer background indexing:
 mode: "full"               # full or incremental
 ```
 
-Returns job snapshot including `id`, `status`, and `progress`.
-Progress updates in smaller steps across fetch/embed/persist phases.
+Returns a job snapshot with `id`, `status`, and `progress`.
+Progress updates in smaller steps across fetch, embed, and persist phases.
 
 #### `get-index-job`
 
@@ -197,7 +197,7 @@ job_id: "<job-id>"
 ```
 
 Poll until status is `completed`, `failed`, or `cancelled`.
-You may also see the transitional status `cancelling`.
+You may see `cancelling` as a transitional status.
 
 #### `list-index-jobs`
 
@@ -214,7 +214,7 @@ job_id: "<job-id>"
 Requests best-effort cancellation for a running job. Cancellation is cooperative:
 - A long-running step must reach a cancellation checkpoint.
 - Partial work may remain.
-- You can safely start a new job after status becomes `cancelled`.
+- Start a new job after the current one reaches `cancelled`.
 
 #### `reindex-note`
 Re-index a single note after manual edits.
@@ -234,8 +234,8 @@ content: "# Heading\n\nMarkdown content..."
 folder: "Work"            # optional, defaults to Notes
 ```
 
-After create/update/delete/move, the server auto-syncs vector and chunk indexes in best-effort mode.
-If sync partially fails, the tool response includes an `index sync warning`; run `reindex-note` or `index-notes`.
+After create, update, delete, or move, the server auto-syncs vector and chunk indexes in best-effort mode.
+If sync partly fails, the tool response includes an `index sync warning`. Run `reindex-note` or `index-notes`.
 
 #### `update-note`
 Update an existing note.
@@ -385,13 +385,13 @@ Set `READONLY_MODE=false` in `.env` to enable write operations.
 Run `index-notes` to update the search index. Use `mode: full` if incremental misses changes.
 
 ### "iCloud account not available" / `Can't get account "iCloud"`
-This error is from a different Apple Notes MCP implementation that uses tool name `search_notes` and argument `Keywords`.
+This error comes from a different Apple Notes MCP implementation that uses tool `search_notes` and argument `Keywords`.
 
 This project uses:
 - tool: `search-notes`
 - argument: `query`
 
-If your client calls `search_notes` with `Keywords`, update the MCP server config to point to `apple-notes-mcp` and restart your MCP client.
+If your client calls `search_notes` with `Keywords`, point your MCP config to `apple-notes-mcp` and restart the client.
 
 ### JXA errors
 Ensure Apple Notes runs and contains notes. Grant automation permissions when prompted.
