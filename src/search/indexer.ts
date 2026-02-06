@@ -8,7 +8,11 @@
  */
 
 import { getEmbedding, getEmbeddingBatch } from "../embeddings/index.js";
-import { getVectorStore, type NoteRecord } from "../db/lancedb.js";
+import {
+  getVectorStore,
+  type NoteRecord,
+  type IndexMetadataRecord,
+} from "../db/lancedb.js";
 import {
   getAllNotesWithFallback,
   getNoteByTitle,
@@ -18,6 +22,11 @@ import { truncateForEmbedding } from "../utils/text.js";
 import { NoteNotFoundError } from "../errors/index.js";
 import { extractMetadata } from "../graph/extract.js";
 import { getEmbeddingBatchSize } from "../config/constants.js";
+import {
+  type IndexRunOptions,
+  type IndexProgressEvent,
+  throwIfCancelled,
+} from "../indexing/contracts.js";
 
 /**
  * Extract note title from folder/title key.
@@ -134,6 +143,21 @@ function chunks<T>(array: T[], size: number): T[][] {
   return result;
 }
 
+function emitProgress(
+  options: IndexRunOptions,
+  stage: IndexProgressEvent["stage"],
+  current: number,
+  total: number,
+  message: string
+): void {
+  options.onProgress?.({
+    stage,
+    current,
+    total,
+    message,
+  });
+}
+
 /**
  * Perform full reindexing of all notes.
  * Drops existing index and rebuilds from scratch.
@@ -142,14 +166,19 @@ function chunks<T>(array: T[], size: number): T[][] {
  * - Hybrid fallback for JXA fetch (single call → folder → note-by-note)
  * - Streaming batch embedding (process & store in chunks to reduce memory)
  */
-export async function fullIndex(): Promise<IndexResult> {
+export async function fullIndex(options: IndexRunOptions = {}): Promise<IndexResult> {
   const startTime = Date.now();
   debug("Starting full index...");
+
+  throwIfCancelled(options.signal);
+  emitProgress(options, "fetch", 0, 1, "Fetching notes");
 
   // Phase 1: Fetch all notes with hybrid fallback
   debug("Phase 1: Fetching all notes (with fallback)...");
   const { notes: allNotes, skipped: skippedNotes } = await getAllNotesWithFallback();
   debug(`Fetched ${allNotes.length} notes, ${skippedNotes.length} skipped`);
+  emitProgress(options, "fetch", 1, 1, `Fetched ${allNotes.length} notes`);
+  throwIfCancelled(options.signal);
 
   // Filter empty notes and prepare for embedding
   const preparedNotes = allNotes
@@ -157,16 +186,14 @@ export async function fullIndex(): Promise<IndexResult> {
     .filter((note): note is PreparedNote => note !== null);
 
   debug(`Prepared ${preparedNotes.length} notes for embedding`);
+  emitProgress(options, "prepare", preparedNotes.length, allNotes.length, "Prepared notes for embedding");
+  throwIfCancelled(options.signal);
 
   const store = getVectorStore();
 
-  // Phase 2: Clear existing index
-  debug("Phase 2: Clearing existing index...");
-  await store.clear();
-
-  // Phase 3: Stream process in batches
+  // Phase 2: Stream process in batches
   const batchSize = getEmbeddingBatchSize();
-  debug(`Phase 3: Processing ${preparedNotes.length} notes in batches of ${batchSize}...`);
+  debug(`Phase 2: Processing ${preparedNotes.length} notes in batches of ${batchSize}...`);
 
   const batches = chunks(preparedNotes, batchSize);
   const indexedAt = new Date().toISOString();
@@ -174,8 +201,17 @@ export async function fullIndex(): Promise<IndexResult> {
   let isFirstBatch = true;
 
   for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
+    throwIfCancelled(options.signal);
+
     const batch = batches[batchIdx];
     debug(`Batch ${batchIdx + 1}/${batches.length}: ${batch.length} notes`);
+    emitProgress(
+      options,
+      "embed",
+      batchIdx,
+      batches.length,
+      `Embedding batch ${batchIdx + 1}/${batches.length}`
+    );
 
     // Generate embeddings for this batch
     const textsToEmbed = batch.map((n) => n.truncatedContent);
@@ -186,6 +222,14 @@ export async function fullIndex(): Promise<IndexResult> {
       debug(`Batch ${batchIdx + 1} embedding failed:`, error);
       throw error;
     }
+    throwIfCancelled(options.signal);
+    emitProgress(
+      options,
+      "embed",
+      batchIdx + 1,
+      batches.length,
+      `Embedded batch ${batchIdx + 1}/${batches.length}`
+    );
 
     // Build records
     const records = batch.map((note, i) =>
@@ -199,20 +243,31 @@ export async function fullIndex(): Promise<IndexResult> {
     } else {
       await store.addRecords(records);
     }
+    throwIfCancelled(options.signal);
 
     totalIndexed += records.length;
     debug(`Batch ${batchIdx + 1} stored, total: ${totalIndexed}`);
+    emitProgress(
+      options,
+      "persist",
+      batchIdx + 1,
+      batches.length,
+      `Stored batch ${batchIdx + 1}/${batches.length}`
+    );
   }
 
-  // Phase 4: Rebuild FTS index (once at end)
-  debug("Phase 4: Rebuilding FTS index...");
+  // Phase 3: Rebuild FTS index (once at end)
+  debug("Phase 3: Rebuilding FTS index...");
   if (totalIndexed > 0) {
+    emitProgress(options, "rebuild-fts", 0, 1, "Rebuilding FTS index");
     await store.rebuildFtsIndex();
+    emitProgress(options, "rebuild-fts", 1, 1, "FTS index rebuilt");
   }
 
   const timeMs = Date.now() - startTime;
   const emptySkipped = allNotes.length - preparedNotes.length;
   debug(`Full index complete: ${totalIndexed} indexed, ${emptySkipped} empty, ${skippedNotes.length} fetch-skipped, ${timeMs}ms`);
+  emitProgress(options, "done", 1, 1, "Full index completed");
 
   return {
     total: allNotes.length + skippedNotes.length,
@@ -228,29 +283,34 @@ export async function fullIndex(): Promise<IndexResult> {
  * Only processes notes that have changed since last index.
  * Uses batch fetch (getAllNotesWithFallback) instead of individual JXA calls.
  */
-export async function incrementalIndex(): Promise<IndexResult> {
+export async function incrementalIndex(options: IndexRunOptions = {}): Promise<IndexResult> {
   const startTime = Date.now();
   debug("Starting incremental index...");
+
+  throwIfCancelled(options.signal);
+  emitProgress(options, "fetch", 0, 1, "Fetching notes for incremental index");
 
   const store = getVectorStore();
 
   // Get existing indexed notes first
-  let existingRecords: NoteRecord[];
+  let existingRecords: IndexMetadataRecord[];
   try {
-    existingRecords = await store.getAll();
+    existingRecords = await store.getIndexMetadata();
   } catch (error) {
     // No existing index, fall back to full index
     debug("No existing index found, performing full index. Error:", error);
-    return fullIndex();
+    return fullIndex(options);
   }
 
   // Phase 1: Fetch ALL notes with content in batch (hybrid fallback)
   debug("Phase 1: Fetching all notes with fallback...");
   const { notes: allNotesWithContent, skipped: skippedNotes } = await getAllNotesWithFallback();
   debug(`Fetched ${allNotesWithContent.length} notes, skipped ${skippedNotes.length}`);
+  emitProgress(options, "fetch", 1, 1, `Fetched ${allNotesWithContent.length} notes`);
+  throwIfCancelled(options.signal);
 
   // Build lookup maps
-  const existingByKey = new Map<string, NoteRecord>();
+  const existingByKey = new Map<string, IndexMetadataRecord>();
   for (const record of existingRecords) {
     const key = `${record.folder}/${record.title}`;
     existingByKey.set(key, record);
@@ -302,6 +362,7 @@ export async function incrementalIndex(): Promise<IndexResult> {
 
   // Process additions and updates - notes already have content!
   const toProcess = [...toAdd, ...toUpdate];
+  emitProgress(options, "prepare", toProcess.length, allNotesWithContent.length, "Prepared notes to process");
 
   if (toProcess.length > 0) {
     // Phase 2: Prepare notes for embedding (content already fetched)
@@ -309,6 +370,7 @@ export async function incrementalIndex(): Promise<IndexResult> {
     const preparedNotes: PreparedNote[] = [];
 
     for (const noteDetails of toProcess) {
+      throwIfCancelled(options.signal);
       const prepared = prepareNoteForEmbedding(noteDetails);
       if (prepared) {
         preparedNotes.push(prepared);
@@ -318,37 +380,74 @@ export async function incrementalIndex(): Promise<IndexResult> {
     if (preparedNotes.length > 0) {
       // Phase 3: Generate embeddings in batch
       debug(`Phase 3: Generating ${preparedNotes.length} embeddings in batch...`);
-      const textsToEmbed = preparedNotes.map(n => n.truncatedContent);
+      const preparedBatches = chunks(preparedNotes, getEmbeddingBatchSize());
+      let persistedCount = 0;
 
-      let vectors: number[][];
-      try {
-        vectors = await getEmbeddingBatch(textsToEmbed);
-      } catch (error) {
-        debug("Batch embedding failed:", error);
-        throw error;
-      }
+      for (let batchIdx = 0; batchIdx < preparedBatches.length; batchIdx++) {
+        throwIfCancelled(options.signal);
 
-      // Phase 4: Update database
-      debug("Phase 4: Updating database...");
-      const indexedAt = new Date().toISOString();
+        const batch = preparedBatches[batchIdx];
+        emitProgress(
+          options,
+          "embed",
+          batchIdx,
+          preparedBatches.length,
+          `Embedding batch ${batchIdx + 1}/${preparedBatches.length}`
+        );
 
-      for (let i = 0; i < preparedNotes.length; i++) {
-        const note = preparedNotes[i];
-        const record = buildNoteRecord(note, vectors[i], indexedAt);
+        const textsToEmbed = batch.map((n) => n.truncatedContent);
 
+        let vectors: number[][];
         try {
-          await store.update(record);
+          vectors = await getEmbeddingBatch(textsToEmbed);
         } catch (error) {
-          debug(`Error updating ${note.title}:`, error);
-          failedNotes.push(`${note.folder}/${note.title}`);
-          errors++;
+          debug("Batch embedding failed:", error);
+          throw error;
+        }
+
+        emitProgress(
+          options,
+          "embed",
+          batchIdx + 1,
+          preparedBatches.length,
+          `Embedded batch ${batchIdx + 1}/${preparedBatches.length}`
+        );
+
+        // Phase 4: Update database
+        debug("Phase 4: Updating database...");
+        const indexedAt = new Date().toISOString();
+
+        for (let i = 0; i < batch.length; i++) {
+          throwIfCancelled(options.signal);
+
+          const note = batch[i];
+          const record = buildNoteRecord(note, vectors[i], indexedAt);
+
+          try {
+            await store.update(record);
+          } catch (error) {
+            debug(`Error updating ${note.title}:`, error);
+            failedNotes.push(`${note.folder}/${note.title}`);
+            errors++;
+          }
+
+          persistedCount += 1;
+          emitProgress(
+            options,
+            "persist",
+            persistedCount,
+            preparedNotes.length,
+            `Persisted ${persistedCount}/${preparedNotes.length} note updates`
+          );
         }
       }
     }
   }
 
   // Process deletions
-  for (const key of toDelete) {
+  for (let deleteIdx = 0; deleteIdx < toDelete.length; deleteIdx++) {
+    const key = toDelete[deleteIdx];
+    throwIfCancelled(options.signal);
     try {
       // Parse folder and title from key (e.g., "Work/Projects/My Note")
       const lastSlash = key.lastIndexOf("/");
@@ -360,16 +459,27 @@ export async function incrementalIndex(): Promise<IndexResult> {
       failedNotes.push(`DELETE: ${key}`);
       errors++;
     }
+
+    emitProgress(
+      options,
+      "delete",
+      deleteIdx + 1,
+      Math.max(toDelete.length, 1),
+      `Deleted ${deleteIdx + 1}/${toDelete.length} stale records`
+    );
   }
 
   // Rebuild FTS index if any changes were made
   if (toAdd.length > 0 || toUpdate.length > 0 || toDelete.length > 0) {
     debug("Rebuilding FTS index after incremental changes");
+    emitProgress(options, "rebuild-fts", 0, 1, "Rebuilding FTS index");
     await store.rebuildFtsIndex();
+    emitProgress(options, "rebuild-fts", 1, 1, "FTS index rebuilt");
   }
 
   const timeMs = Date.now() - startTime;
   debug(`Incremental index complete: ${timeMs}ms`);
+  emitProgress(options, "done", 1, 1, "Incremental index completed");
 
   return {
     total: allNotesWithContent.length,
@@ -420,10 +530,11 @@ export async function reindexNote(title: string): Promise<void> {
  * Index notes based on mode.
  */
 export async function indexNotes(
-  mode: "full" | "incremental" = "incremental"
+  mode: "full" | "incremental" = "incremental",
+  options: IndexRunOptions = {}
 ): Promise<IndexResult> {
   if (mode === "full") {
-    return fullIndex();
+    return fullIndex(options);
   }
-  return incrementalIndex();
+  return incrementalIndex(options);
 }

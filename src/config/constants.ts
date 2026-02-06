@@ -19,6 +19,7 @@ export const RRF_K = 60; // Reciprocal Rank Fusion constant
 
 // Timeouts and retries
 export const OPENROUTER_TIMEOUT_MS = 30000;
+export const DEFAULT_SEARCH_REFRESH_TIMEOUT_MS = 2000;
 
 // Cache settings
 export const EMBEDDING_CACHE_MAX_SIZE = 1000;
@@ -51,6 +52,10 @@ export const DEFAULT_CHUNK_OVERLAP = 100;
 
 // Batch processing
 export const DEFAULT_EMBEDDING_BATCH_SIZE = 50;
+
+// Background indexing jobs
+export const DEFAULT_INDEX_JOB_RETENTION_SECONDS = 3600;
+export const MAX_INDEX_JOB_HISTORY = 100;
 
 /**
  * Get embedding batch size from environment or use default.

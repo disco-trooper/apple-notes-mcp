@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `SEARCH_REFRESH_TIMEOUT_MS` environment variable to cap how long `search-notes` waits for auto-refresh
+- TTL refresh policy module with focused tests (`refresh-policy`)
+- Background index job manager with `start-index-job`, `get-index-job`, and `list-index-jobs`
+- `cancel-index-job` for best-effort cancellation of running background jobs
+- `INDEX_JOB_RETENTION_SECONDS` environment variable for index job history retention
+- Post-write index sync layer for create/update/delete/move operations
+- Shared indexing progress/cancellation contracts for job orchestration
+
+### Changed
+
+- `search-notes` auto-refresh now respects `INDEX_TTL` (disabled when unset)
+- Auto-refresh now fails open: if refresh fails or times out, search continues using stale index instead of returning an error
+- Incremental index and refresh change detection now use metadata-only index reads instead of full record loads
+- `index-notes` supports explicit `background` mode while keeping synchronous default behavior for backward compatibility
+- CRUD operations now return richer note metadata (including note ID) for robust index synchronization
+- Background job progress is now granular (phase and batch based) instead of mostly static
+- Background jobs now support `cancelling` and `cancelled` states
+
 ## [1.7.0] - 2026-01-22
 
 ### Added

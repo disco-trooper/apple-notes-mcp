@@ -8,9 +8,18 @@ import { getChunkStore, type ChunkRecord } from "../db/lancedb.js";
 import { getAllNotesWithFallback, type NoteDetails } from "../notes/read.js";
 import { chunkText } from "../utils/chunker.js";
 import { extractMetadata } from "../graph/extract.js";
-import { DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP } from "../config/constants.js";
+import {
+  DEFAULT_CHUNK_SIZE,
+  DEFAULT_CHUNK_OVERLAP,
+  getEmbeddingBatchSize,
+} from "../config/constants.js";
 import { createDebugLogger } from "../utils/debug.js";
 import { filterContent, shouldIndexContent } from "../utils/content-filter.js";
+import {
+  type IndexRunOptions,
+  type IndexProgressEvent,
+  throwIfCancelled,
+} from "../indexing/contracts.js";
 
 // Debug logging
 const debug = createDebugLogger("CHUNK-INDEXER");
@@ -46,6 +55,29 @@ interface InternalChunkRecord {
   indexed_at: string;
   tags: string[];
   outlinks: string[];
+}
+
+function chunks<T>(array: T[], size: number): T[][] {
+  const result: T[][] = [];
+  for (let i = 0; i < array.length; i += size) {
+    result.push(array.slice(i, i + size));
+  }
+  return result;
+}
+
+function emitProgress(
+  options: IndexRunOptions,
+  stage: IndexProgressEvent["stage"],
+  current: number,
+  total: number,
+  message: string
+): void {
+  options.onProgress?.({
+    stage,
+    current,
+    total,
+    message,
+  });
 }
 
 /**
@@ -125,13 +157,17 @@ export function chunkNote(note: NoteDetails): InternalChunkRecord[] {
  *
  * @returns ChunkIndexResult with stats
  */
-export async function fullChunkIndex(): Promise<ChunkIndexResult> {
+export async function fullChunkIndex(options: IndexRunOptions = {}): Promise<ChunkIndexResult> {
   const startTime = Date.now();
+  throwIfCancelled(options.signal);
+  emitProgress(options, "fetch", 0, 1, "Fetching notes for chunk index");
 
   // Phase 1: Fetch all notes with hybrid fallback
   debug("Phase 1: Fetching all notes with fallback...");
   const { notes, skipped: skippedNotes } = await getAllNotesWithFallback();
   debug(`Fetched ${notes.length} notes, skipped ${skippedNotes.length}`);
+  emitProgress(options, "fetch", 1, 1, `Fetched ${notes.length} notes`);
+  throwIfCancelled(options.signal);
 
   if (notes.length === 0) {
     return {
@@ -147,10 +183,13 @@ export async function fullChunkIndex(): Promise<ChunkIndexResult> {
   debug("Phase 2: Chunking all notes...");
   const allChunks: InternalChunkRecord[] = [];
   for (const note of notes) {
+    throwIfCancelled(options.signal);
     const noteChunks = chunkNote(note);
     allChunks.push(...noteChunks);
   }
   debug(`Created ${allChunks.length} chunks from ${notes.length} notes`);
+  emitProgress(options, "prepare", allChunks.length, Math.max(notes.length, 1), "Prepared note chunks");
+  throwIfCancelled(options.signal);
 
   if (allChunks.length === 0) {
     return {
@@ -163,9 +202,32 @@ export async function fullChunkIndex(): Promise<ChunkIndexResult> {
 
   // Phase 3: Generate embeddings in batch
   debug("Phase 3: Generating embeddings...");
-  const chunkTexts: string[] = allChunks.map((chunk) => chunk.content);
-  const vectors = await getEmbeddingBatch(chunkTexts);
+  const chunkBatches = chunks(allChunks, getEmbeddingBatchSize());
+  const vectors: number[][] = [];
+  for (let batchIdx = 0; batchIdx < chunkBatches.length; batchIdx++) {
+    throwIfCancelled(options.signal);
+    emitProgress(
+      options,
+      "embed",
+      batchIdx,
+      chunkBatches.length,
+      `Embedding chunk batch ${batchIdx + 1}/${chunkBatches.length}`
+    );
+
+    const batchTexts = chunkBatches[batchIdx].map((chunk) => chunk.content);
+    const batchVectors = await getEmbeddingBatch(batchTexts);
+    vectors.push(...batchVectors);
+
+    emitProgress(
+      options,
+      "embed",
+      batchIdx + 1,
+      chunkBatches.length,
+      `Embedded chunk batch ${batchIdx + 1}/${chunkBatches.length}`
+    );
+  }
   debug(`Generated ${vectors.length} embeddings`);
+  throwIfCancelled(options.signal);
 
   // Phase 4: Combine chunks with vectors and set indexed_at
   debug("Phase 4: Combining chunks with vectors...");
@@ -179,11 +241,14 @@ export async function fullChunkIndex(): Promise<ChunkIndexResult> {
   // Phase 5: Store in LanceDB
   debug("Phase 5: Storing chunks...");
   const chunkStore = getChunkStore();
+  emitProgress(options, "persist", 0, 1, "Storing chunk vectors");
   await chunkStore.indexChunks(completeChunks);
+  emitProgress(options, "persist", 1, 1, "Stored chunk vectors");
   debug(`Stored ${completeChunks.length} chunks`);
 
   const timeMs = Date.now() - startTime;
   debug(`Chunk indexing completed in ${timeMs}ms`);
+  emitProgress(options, "done", 1, 1, "Chunk index completed");
 
   return {
     totalNotes: notes.length,

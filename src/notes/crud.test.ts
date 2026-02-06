@@ -74,16 +74,32 @@ describe("createNote", () => {
   });
 
   it("should create note successfully", async () => {
-    vi.mocked(runJxa).mockResolvedValueOnce("ok");
+    vi.mocked(runJxa).mockResolvedValueOnce(
+      JSON.stringify({ id: "note-1", title: "New Note", folder: "Work" })
+    );
 
-    await expect(createNote("New Note", "Content", "Work")).resolves.toBeUndefined();
+    await expect(createNote("New Note", "Content", "Work")).resolves.toEqual({
+      id: "note-1",
+      title: "New Note",
+      folder: "Work",
+      requestedTitle: "New Note",
+      titleChanged: false,
+    });
   });
 
   it("should allow duplicate titles (Apple Notes uses IDs)", async () => {
-    vi.mocked(runJxa).mockResolvedValueOnce("ok");
+    vi.mocked(runJxa).mockResolvedValueOnce(
+      JSON.stringify({ id: "note-2", title: "Existing Note", folder: "Notes" })
+    );
 
     // Should not throw even if a note with same title exists
-    await expect(createNote("Existing Note", "Content")).resolves.toBeUndefined();
+    await expect(createNote("Existing Note", "Content")).resolves.toEqual({
+      id: "note-2",
+      title: "Existing Note",
+      folder: "Notes",
+      requestedTitle: "Existing Note",
+      titleChanged: false,
+    });
   });
 });
 
@@ -116,6 +132,7 @@ describe("updateNote", () => {
 
     const result = await updateNote("Test", "New Content");
     expect(result).toEqual({
+      id: "123",
       originalTitle: "Test",
       newTitle: "Test",
       folder: "Work",
@@ -133,6 +150,7 @@ describe("updateNote", () => {
 
     const result = await updateNote("Original Title", "# New Heading\n\nContent");
     expect(result).toEqual({
+      id: "123",
       originalTitle: "Original Title",
       newTitle: "New Heading",
       folder: "Work",
@@ -179,7 +197,11 @@ describe("deleteNote", () => {
     });
     vi.mocked(runJxa).mockResolvedValueOnce("ok");
 
-    await expect(deleteNote("Test")).resolves.toBeUndefined();
+    await expect(deleteNote("Test")).resolves.toEqual({
+      id: "123",
+      title: "Test",
+      folder: "Work",
+    });
   });
 
   it("should include suggestions in error when multiple notes found", async () => {
@@ -221,7 +243,12 @@ describe("moveNote", () => {
     });
     vi.mocked(runJxa).mockResolvedValueOnce("ok");
 
-    await expect(moveNote("Test", "Personal")).resolves.toBeUndefined();
+    await expect(moveNote("Test", "Personal")).resolves.toEqual({
+      id: "123",
+      title: "Test",
+      fromFolder: "Work",
+      toFolder: "Personal",
+    });
   });
 
   it("should include suggestions in error when multiple notes found", async () => {

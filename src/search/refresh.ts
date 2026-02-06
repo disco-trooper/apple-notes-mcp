@@ -5,12 +5,26 @@
  */
 
 import { getAllNotes, getNoteByFolderAndTitle, type NoteInfo } from "../notes/read.js";
-import { getVectorStore, getChunkStore } from "../db/lancedb.js";
+import {
+  getVectorStore,
+  getChunkStore,
+  type IndexMetadataRecord,
+} from "../db/lancedb.js";
 import { incrementalIndex } from "./indexer.js";
 import { updateChunksForNotes, hasChunkIndex } from "./chunk-indexer.js";
 import { createDebugLogger } from "../utils/debug.js";
+import { DEFAULT_SEARCH_REFRESH_TIMEOUT_MS } from "../config/constants.js";
+import { shouldAutoRefreshByTtl } from "./refresh-policy.js";
 
 const debug = createDebugLogger("REFRESH");
+let refreshInFlight: Promise<boolean> | null = null;
+
+interface LegacyIndexRecord {
+  id?: string;
+  title: string;
+  folder: string;
+  indexed_at: string;
+}
 
 /**
  * Detected changes in notes.
@@ -22,27 +36,144 @@ interface DetectedChanges {
   deleted: string[]; // note IDs
 }
 
+async function getIndexMetadata(): Promise<IndexMetadataRecord[]> {
+  const store = getVectorStore() as {
+    getIndexMetadata?: () => Promise<IndexMetadataRecord[]>;
+    getAll?: () => Promise<LegacyIndexRecord[]>;
+  };
+
+  if (typeof store.getIndexMetadata === "function") {
+    return store.getIndexMetadata();
+  }
+
+  if (typeof store.getAll === "function") {
+    const legacyRecords = await store.getAll();
+    return legacyRecords.map((record) => ({
+      id: record.id ?? "",
+      title: record.title,
+      folder: record.folder,
+      indexed_at: record.indexed_at,
+    }));
+  }
+
+  throw new Error("Vector store does not expose index metadata methods");
+}
+
+function getLatestIndexedAtMs(records: IndexMetadataRecord[]): number | null {
+  let latestMs: number | null = null;
+
+  for (const record of records) {
+    const indexedAtMs = Date.parse(record.indexed_at);
+    if (Number.isNaN(indexedAtMs)) {
+      continue;
+    }
+    if (latestMs === null || indexedAtMs > latestMs) {
+      latestMs = indexedAtMs;
+    }
+  }
+
+  return latestMs;
+}
+
+function getSearchRefreshTimeoutMs(): number {
+  const raw = process.env.SEARCH_REFRESH_TIMEOUT_MS;
+  if (!raw) {
+    return DEFAULT_SEARCH_REFRESH_TIMEOUT_MS;
+  }
+
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return DEFAULT_SEARCH_REFRESH_TIMEOUT_MS;
+  }
+
+  return parsed;
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T | null> {
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+
+  const timeoutPromise = new Promise<null>((resolve) => {
+    timeoutHandle = setTimeout(() => resolve(null), timeoutMs);
+  });
+
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timeoutHandle !== undefined) {
+      clearTimeout(timeoutHandle);
+    }
+  }
+}
+
+async function runRefresh(existingRecords: IndexMetadataRecord[]): Promise<boolean> {
+  const changes = await detectChanges(existingRecords);
+
+  if (!changes.hasChanges) {
+    return false;
+  }
+
+  // Update main index
+  debug("Changes detected, running incremental index...");
+  const result = await incrementalIndex();
+  debug(`Main index refresh: ${result.indexed} notes updated in ${result.timeMs}ms`);
+
+  // Update chunk index if it exists and there are changes
+  const hasChunks = await hasChunkIndex();
+  if (hasChunks && (changes.added.length > 0 || changes.modified.length > 0)) {
+    debug("Updating chunk index for changed notes...");
+
+    // Fetch full content for changed notes
+    const changedNotes = [...changes.added, ...changes.modified];
+    const notesWithContent = await Promise.all(
+      changedNotes.map(async (n) => {
+        const note = await getNoteByFolderAndTitle(n.folder, n.title);
+        return note;
+      })
+    );
+
+    // Filter out nulls (notes that couldn't be fetched)
+    const validNotes = notesWithContent.filter((n) => n !== null);
+
+    if (validNotes.length > 0) {
+      const chunksCreated = await updateChunksForNotes(validNotes);
+      debug(`Chunk index refresh: ${chunksCreated} chunks for ${validNotes.length} notes`);
+    }
+
+    // Delete chunks for deleted notes
+    if (changes.deleted.length > 0) {
+      const chunkStore = getChunkStore();
+      await chunkStore.deleteChunksByNoteIds(changes.deleted);
+      debug(`Deleted chunks for ${changes.deleted.length} notes`);
+    }
+  }
+
+  return true;
+}
+
 /**
  * Check for note changes and return details about what changed.
  */
-export async function detectChanges(): Promise<DetectedChanges> {
+export async function detectChanges(
+  existingIndexMetadata?: IndexMetadataRecord[]
+): Promise<DetectedChanges> {
   debug("Checking for changes...");
 
   const currentNotes = await getAllNotes();
-  const store = getVectorStore();
 
-  let existingRecords;
-  try {
-    existingRecords = await store.getAll();
-  } catch {
-    // No index exists yet
-    debug("No existing index found");
-    return {
-      hasChanges: currentNotes.length > 0,
-      added: currentNotes,
-      modified: [],
-      deleted: [],
-    };
+  let existingRecords = existingIndexMetadata;
+  if (!existingRecords) {
+    try {
+      existingRecords = await getIndexMetadata();
+    } catch {
+      // No index exists yet
+      debug("No existing index found");
+      return {
+        hasChanges: currentNotes.length > 0,
+        added: currentNotes,
+        modified: [],
+        deleted: [],
+      };
+    }
   }
 
   // Build lookup maps
@@ -106,46 +237,75 @@ export async function checkForChanges(): Promise<boolean> {
  * @returns true if index was refreshed, false if no changes
  */
 export async function refreshIfNeeded(): Promise<boolean> {
-  const changes = await detectChanges();
+  try {
+    const ttlRaw = process.env.INDEX_TTL;
+    if (!ttlRaw) {
+      debug("Auto-refresh disabled (INDEX_TTL not set)");
+      return false;
+    }
 
-  if (!changes.hasChanges) {
+    const parsedTtlSeconds = Number.parseInt(ttlRaw, 10);
+    if (!Number.isFinite(parsedTtlSeconds) || parsedTtlSeconds <= 0) {
+      debug("Auto-refresh disabled (INDEX_TTL invalid)");
+      return false;
+    }
+
+    const timeoutMs = getSearchRefreshTimeoutMs();
+    if (refreshInFlight) {
+      debug("Auto-refresh already in progress, waiting for existing run");
+      const sharedResult = await withTimeout(refreshInFlight, timeoutMs);
+      if (sharedResult === null) {
+        debug(`Auto-refresh wait timed out after ${timeoutMs}ms; returning stale index results`);
+        return false;
+      }
+      return sharedResult;
+    }
+
+    const refreshTask = (async () => {
+      let existingRecords: IndexMetadataRecord[] = [];
+
+      try {
+        existingRecords = await getIndexMetadata();
+      } catch {
+        // No index yet - treat as empty metadata
+        existingRecords = [];
+      }
+
+      const lastIndexedAtMs = getLatestIndexedAtMs(existingRecords);
+      const shouldRefresh = shouldAutoRefreshByTtl(
+        ttlRaw,
+        Date.now(),
+        lastIndexedAtMs
+      );
+
+      if (!shouldRefresh) {
+        debug("Auto-refresh skipped by TTL policy");
+        return false;
+      }
+
+      return runRefresh(existingRecords);
+    })()
+      .catch((error) => {
+        debug("Auto-refresh failed; returning stale index results", error);
+        return false;
+      })
+      .finally(() => {
+        if (refreshInFlight === refreshTask) {
+          refreshInFlight = null;
+        }
+      });
+
+    refreshInFlight = refreshTask;
+
+    const refreshed = await withTimeout(refreshTask, timeoutMs);
+    if (refreshed === null) {
+      debug(`Auto-refresh timed out after ${timeoutMs}ms; returning stale index results`);
+      return false;
+    }
+
+    return refreshed;
+  } catch (error) {
+    debug("Unexpected auto-refresh failure; returning stale index results", error);
     return false;
   }
-
-  // Update main index
-  debug("Changes detected, running incremental index...");
-  const result = await incrementalIndex();
-  debug(`Main index refresh: ${result.indexed} notes updated in ${result.timeMs}ms`);
-
-  // Update chunk index if it exists and there are changes
-  const hasChunks = await hasChunkIndex();
-  if (hasChunks && (changes.added.length > 0 || changes.modified.length > 0)) {
-    debug("Updating chunk index for changed notes...");
-
-    // Fetch full content for changed notes
-    const changedNotes = [...changes.added, ...changes.modified];
-    const notesWithContent = await Promise.all(
-      changedNotes.map(async (n) => {
-        const note = await getNoteByFolderAndTitle(n.folder, n.title);
-        return note;
-      })
-    );
-
-    // Filter out nulls (notes that couldn't be fetched)
-    const validNotes = notesWithContent.filter((n) => n !== null);
-
-    if (validNotes.length > 0) {
-      const chunksCreated = await updateChunksForNotes(validNotes);
-      debug(`Chunk index refresh: ${chunksCreated} chunks for ${validNotes.length} notes`);
-    }
-
-    // Delete chunks for deleted notes
-    if (changes.deleted.length > 0) {
-      const chunkStore = getChunkStore();
-      await chunkStore.deleteChunksByNoteIds(changes.deleted);
-      debug(`Deleted chunks for ${changes.deleted.length} notes`);
-    }
-  }
-
-  return true;
 }

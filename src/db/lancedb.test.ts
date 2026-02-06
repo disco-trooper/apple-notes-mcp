@@ -72,6 +72,20 @@ describe("LanceDBStore", () => {
       await store.index([createTestRecord("Existing")]);
       await expect(store.delete("Non Existent")).resolves.not.toThrow();
     });
+
+    it("deleteByIdAndFolderAndTitle removes only matching record", async () => {
+      const base = createTestRecord("Shared");
+      const other = { ...createTestRecord("Shared"), id: "other-id" };
+
+      await store.index([base, other]);
+      expect(await store.count()).toBe(2);
+
+      await store.deleteByIdAndFolderAndTitle(base.id, base.folder, base.title);
+
+      expect(await store.count()).toBe(1);
+      const remaining = await store.getByTitle("Shared");
+      expect(remaining?.id).toBe("other-id");
+    });
   });
 
   describe("getAll", () => {

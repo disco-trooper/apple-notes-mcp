@@ -6,6 +6,8 @@ const EnvSchema = z.object({
   EMBEDDING_DIMS: z.string().regex(/^\d+$/).optional(),
   READONLY_MODE: z.enum(["true", "false"]).optional(),
   INDEX_TTL: z.string().regex(/^\d+$/).optional(),
+  SEARCH_REFRESH_TIMEOUT_MS: z.string().regex(/^\d+$/).optional(),
+  INDEX_JOB_RETENTION_SECONDS: z.string().regex(/^\d+$/).optional(),
   DEBUG: z.enum(["true", "false"]).optional(),
 });
 

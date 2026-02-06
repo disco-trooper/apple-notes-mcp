@@ -32,6 +32,13 @@ import { indexNotes, reindexNote } from "./search/indexer.js";
 import { fullChunkIndex, hasChunkIndex } from "./search/chunk-indexer.js";
 import { searchChunks } from "./search/chunk-search.js";
 import { refreshIfNeeded } from "./search/refresh.js";
+import { getIndexJobManager } from "./indexing/job-manager.js";
+import {
+  syncAfterCreate,
+  syncAfterUpdate,
+  syncAfterDelete,
+  syncAfterMove,
+} from "./search/write-sync.js";
 import { listTags, searchByTag, findRelatedNotes } from "./graph/queries.js";
 import { exportGraph } from "./graph/export.js";
 import { findTables, parseTable } from "./notes/tables.js";
@@ -85,6 +92,23 @@ const SearchNotesSchema = z.object({
 const IndexNotesSchema = z.object({
   mode: z.enum(["full", "incremental"]).default("incremental"),
   force: z.boolean().default(false),
+  background: z.boolean().optional(),
+});
+
+const StartIndexJobSchema = z.object({
+  mode: z.enum(["full", "incremental"]).default("incremental"),
+});
+
+const GetIndexJobSchema = z.object({
+  job_id: z.string().min(1),
+});
+
+const ListIndexJobsSchema = z.object({
+  limit: z.number().min(1).max(50).default(10),
+});
+
+const CancelIndexJobSchema = z.object({
+  job_id: z.string().min(1),
 });
 
 const ReindexNoteSchema = z.object({
@@ -254,8 +278,69 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: "boolean",
               description: "Force reindex even if TTL hasn't expired (default: false)"
             },
+            background: {
+              type: "boolean",
+              description: "Run indexing as async background job (default: false)"
+            },
           },
           required: [],
+        },
+      },
+      {
+        name: "start-index-job",
+        description: "Start background indexing job and return job id for polling",
+        inputSchema: {
+          type: "object",
+          properties: {
+            mode: {
+              type: "string",
+              enum: ["full", "incremental"],
+              description: "Index mode (default: incremental)",
+            },
+          },
+          required: [],
+        },
+      },
+      {
+        name: "get-index-job",
+        description: "Get background indexing job status and progress",
+        inputSchema: {
+          type: "object",
+          properties: {
+            job_id: {
+              type: "string",
+              description: "Job ID returned from start-index-job or index-notes",
+            },
+          },
+          required: ["job_id"],
+        },
+      },
+      {
+        name: "list-index-jobs",
+        description: "List recent background indexing jobs",
+        inputSchema: {
+          type: "object",
+          properties: {
+            limit: {
+              type: "number",
+              description: "Max jobs to return (default: 10)",
+            },
+          },
+          required: [],
+        },
+      },
+      {
+        name: "cancel-index-job",
+        description: "Request cancellation for a running background indexing job",
+        inputSchema: {
+          type: "object",
+          properties: {
+            job_id: {
+              type: "string",
+              description: "Job ID returned from start-index-job or index-notes",
+            },
+          },
+          required: ["job_id"],
         },
       },
       {
@@ -586,6 +671,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "index-notes": {
         const params = IndexNotesSchema.parse(args);
+        const jobs = getIndexJobManager();
+
+        const runInBackground = params.background ?? false;
+        if (runInBackground) {
+          const job = jobs.start({ mode: params.mode });
+          return textResponse(
+            JSON.stringify(
+              {
+                message: `Started ${params.mode} index job`,
+                job_id: job.id,
+                status: job.status,
+                progress: job.progress,
+              },
+              null,
+              2
+            )
+          );
+        }
+
         const result = await indexNotes(params.mode);
 
         let message = `Indexed ${result.indexed} notes in ${(result.timeMs / 1000).toFixed(1)}s`;
@@ -624,6 +728,40 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         return textResponse(message);
+      }
+
+      case "start-index-job": {
+        const params = StartIndexJobSchema.parse(args);
+        const jobs = getIndexJobManager();
+        const job = jobs.start({ mode: params.mode });
+        return textResponse(JSON.stringify(job, null, 2));
+      }
+
+      case "get-index-job": {
+        const params = GetIndexJobSchema.parse(args);
+        const jobs = getIndexJobManager();
+        const job = jobs.get(params.job_id);
+        if (!job) {
+          return errorResponse(`Index job not found: "${params.job_id}"`);
+        }
+        return textResponse(JSON.stringify(job, null, 2));
+      }
+
+      case "list-index-jobs": {
+        const params = ListIndexJobsSchema.parse(args);
+        const jobs = getIndexJobManager();
+        const list = jobs.list(params.limit);
+        return textResponse(JSON.stringify(list, null, 2));
+      }
+
+      case "cancel-index-job": {
+        const params = CancelIndexJobSchema.parse(args);
+        const jobs = getIndexJobManager();
+        const job = jobs.cancel(params.job_id);
+        if (!job) {
+          return errorResponse(`Index job not found: "${params.job_id}"`);
+        }
+        return textResponse(JSON.stringify(job, null, 2));
       }
 
       case "reindex-note": {
@@ -726,9 +864,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // Write tools
       case "create-note": {
         const params = CreateNoteSchema.parse(args);
-        await createNote(params.title, params.content, params.folder);
-        const location = params.folder ? `${params.folder}/${params.title}` : params.title;
-        return textResponse(`Created note: "${location}"`);
+        const result = await createNote(params.title, params.content, params.folder);
+        const location = `${result.folder}/${result.title}`;
+
+        const syncResult = await syncAfterCreate(result);
+        const syncWarning = syncResult.warnings.length > 0
+          ? ` (index sync warning: ${syncResult.warnings.join("; ")})`
+          : "";
+
+        return textResponse(`Created note: "${location}"${syncWarning}`);
       }
 
       case "update-note": {
@@ -742,15 +886,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           : "";
 
         if (params.reindex) {
-          try {
-            // Use new title for reindexing (Apple Notes may have renamed it)
-            const reindexTitle = `${result.folder}/${result.newTitle}`;
-            await reindexNote(reindexTitle);
-            return textResponse(`Updated and reindexed note: "${location}"${renamedMsg}`);
-          } catch (reindexError) {
-            debug("Reindex after update failed:", reindexError);
-            return textResponse(`Updated note: "${location}"${renamedMsg} (reindexing failed, run index-notes to update)`);
-          }
+          const syncResult = await syncAfterUpdate(result);
+          const syncWarning = syncResult.warnings.length > 0
+            ? ` (index sync warning: ${syncResult.warnings.join("; ")})`
+            : "";
+          return textResponse(`Updated and reindexed note: "${location}"${renamedMsg}${syncWarning}`);
         }
 
         return textResponse(`Updated note: "${location}"${renamedMsg}`);
@@ -761,14 +901,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!params.confirm) {
           return errorResponse("Add confirm: true to delete the note");
         }
-        await deleteNote(params.title);
-        return textResponse(`Deleted note: "${params.title}"`);
+        const result = await deleteNote(params.title);
+        const syncResult = await syncAfterDelete(result);
+        const syncWarning = syncResult.warnings.length > 0
+          ? ` (index sync warning: ${syncResult.warnings.join("; ")})`
+          : "";
+        return textResponse(`Deleted note: "${params.title}"${syncWarning}`);
       }
 
       case "move-note": {
         const params = MoveNoteSchema.parse(args);
-        await moveNote(params.title, params.folder);
-        return textResponse(`Moved note: "${params.title}" to folder "${params.folder}"`);
+        const result = await moveNote(params.title, params.folder);
+        const syncResult = await syncAfterMove(result);
+        const syncWarning = syncResult.warnings.length > 0
+          ? ` (index sync warning: ${syncResult.warnings.join("; ")})`
+          : "";
+        return textResponse(`Moved note: "${params.title}" to folder "${params.folder}"${syncWarning}`);
       }
 
       case "edit-table": {

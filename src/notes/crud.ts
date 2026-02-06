@@ -72,7 +72,7 @@ export async function createNote(
   title: string,
   content: string,
   folder?: string
-): Promise<void> {
+): Promise<CreateResult> {
   checkReadOnly();
 
   debug(`Creating note: "${title}" in folder: "${folder || "Notes"}"`);
@@ -85,7 +85,7 @@ export async function createNote(
 
   debug(`HTML content length: ${htmlContent.length}`);
 
-  await runJxa(`
+  const result = await runJxa(`
     const app = Application('Notes');
     const title = ${escapedTitle};
     const content = ${escapedContent};
@@ -109,10 +109,36 @@ export async function createNote(
     const note = app.Note({name: title, body: content});
     targetFolder.notes.push(note);
 
-    return "ok";
-  `);
+    return JSON.stringify({
+      id: note.id(),
+      title: note.name(),
+      folder: targetFolder.name(),
+    });
+  `) as string;
 
-  debug(`Note created: "${title}"`);
+  const created = JSON.parse(result) as {
+    id: string;
+    title: string;
+    folder: string;
+  };
+
+  debug(`Note created: "${created.folder}/${created.title}"`);
+
+  return {
+    id: created.id,
+    title: created.title,
+    folder: created.folder,
+    requestedTitle: title,
+    titleChanged: created.title !== title,
+  };
+}
+
+export interface CreateResult {
+  id: string;
+  title: string;
+  folder: string;
+  requestedTitle: string;
+  titleChanged: boolean;
 }
 
 /**
@@ -120,6 +146,8 @@ export async function createNote(
  * Apple Notes may rename the note based on content (first h1 heading).
  */
 export interface UpdateResult {
+  /** Note ID */
+  id: string;
   /** Original title before update */
   originalTitle: string;
   /** Current title after update (may differ if Apple Notes renamed it) */
@@ -189,6 +217,7 @@ export async function updateNote(title: string, content: string): Promise<Update
   }
 
   return {
+    id: note.id,
     originalTitle,
     newTitle,
     folder,
@@ -206,7 +235,7 @@ export async function updateNote(title: string, content: string): Promise<Update
  * @throws Error if READONLY_MODE is enabled
  * @throws Error if note not found or duplicate titles without folder prefix
  */
-export async function deleteNote(title: string): Promise<void> {
+export async function deleteNote(title: string): Promise<DeleteResult> {
   checkReadOnly();
 
   debug(`Deleting note: "${title}"`);
@@ -232,6 +261,18 @@ export async function deleteNote(title: string): Promise<void> {
   `);
 
   debug(`Note deleted: "${title}"`);
+
+  return {
+    id: note.id,
+    title: note.title,
+    folder: note.folder,
+  };
+}
+
+export interface DeleteResult {
+  id: string;
+  title: string;
+  folder: string;
 }
 
 /**
@@ -242,7 +283,7 @@ export async function deleteNote(title: string): Promise<void> {
  * @throws Error if READONLY_MODE is enabled
  * @throws Error if note not found or target folder not found
  */
-export async function moveNote(title: string, folder: string): Promise<void> {
+export async function moveNote(title: string, folder: string): Promise<MoveResult> {
   checkReadOnly();
 
   debug(`Moving note: "${title}" to folder: "${folder}"`);
@@ -277,6 +318,20 @@ export async function moveNote(title: string, folder: string): Promise<void> {
   `);
 
   debug(`Note moved: "${title}" -> "${folder}"`);
+
+  return {
+    id: note.id,
+    title: note.title,
+    fromFolder: note.folder,
+    toFolder: folder,
+  };
+}
+
+export interface MoveResult {
+  id: string;
+  title: string;
+  fromFolder: string;
+  toFolder: string;
 }
 
 export interface TableEdit {
