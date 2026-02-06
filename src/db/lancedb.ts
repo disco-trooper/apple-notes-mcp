@@ -20,6 +20,13 @@ export interface NoteRecord {
   [key: string]: unknown; // Index signature for LanceDB compatibility
 }
 
+export interface IndexMetadataRecord {
+  id: string;
+  title: string;
+  folder: string;
+  indexed_at: string;
+}
+
 // Schema for chunked notes (Parent Document Retriever pattern)
 export interface ChunkRecord {
   chunk_id: string;      // `${note_id}_chunk_${index}`
@@ -51,6 +58,7 @@ export interface VectorStore {
   search(queryVector: number[], limit: number): Promise<SearchResult[]>;
   searchFTS(query: string, limit: number): Promise<SearchResult[]>;
   getByTitle(title: string): Promise<NoteRecord | null>;
+  getIndexMetadata(): Promise<IndexMetadataRecord[]>;
   getAll(): Promise<NoteRecord[]>;
   count(): Promise<number>;
   clear(): Promise<void>;
@@ -293,6 +301,22 @@ export class LanceDBStore implements VectorStore {
     if (results.length === 0) return null;
 
     return results[0] as unknown as NoteRecord;
+  }
+
+  async getIndexMetadata(): Promise<IndexMetadataRecord[]> {
+    const table = await this.ensureTable();
+
+    const results = await table
+      .query()
+      .select(["id", "title", "folder", "indexed_at"])
+      .toArray();
+
+    return results.map((row): IndexMetadataRecord => ({
+      id: (row.id as string) ?? "",
+      title: row.title as string,
+      folder: row.folder as string,
+      indexed_at: row.indexed_at as string,
+    }));
   }
 
   async getAll(): Promise<NoteRecord[]> {

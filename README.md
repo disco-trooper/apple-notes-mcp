@@ -18,6 +18,7 @@ MCP server for Apple Notes with semantic search and CRUD operations. Claude sear
 - **Semantic Search** - Find notes by meaning, not keywords
 - **Full CRUD** - Create, read, update, delete, and move notes
 - **Incremental Indexing** - Re-embed only changed notes
+- **Background Index Jobs** - Async full/incremental indexing with progress polling
 - **Dual Embedding** - Local HuggingFace or OpenRouter API
 
 ## What's New in 1.7
@@ -76,9 +77,18 @@ Configuration stored in `~/.apple-notes-mcp/.env`:
 | `EMBEDDING_MODEL` | Model name (local or OpenRouter) | `Xenova/multilingual-e5-small` |
 | `EMBEDDING_DIMS` | Embedding dimensions | `4096` |
 | `READONLY_MODE` | Block all write operations | `false` |
-| `INDEX_TTL` | Auto-reindex interval in seconds | - |
+| `INDEX_TTL` | Auto-refresh-on-search interval in seconds (disabled when unset) | - |
+| `SEARCH_REFRESH_TIMEOUT_MS` | Max time search waits for refresh before using stale index | `2000` |
+| `INDEX_JOB_RETENTION_SECONDS` | How long completed/failed index jobs remain queryable | `3600` |
 | `EMBEDDING_BATCH_SIZE` | Batch size for embedding generation | `50` |
 | `DEBUG` | Enable debug logging | `false` |
+
+### Search Auto-Refresh Policy
+
+- `search-notes` does **not** force refresh on every request.
+- If `INDEX_TTL` is unset, auto-refresh is disabled and search uses the current index.
+- If `INDEX_TTL` is set, refresh runs only after TTL expiration.
+- If refresh fails or takes longer than `SEARCH_REFRESH_TIMEOUT_MS`, search falls back to stale index results instead of timing out.
 
 To reconfigure:
 
@@ -164,9 +174,47 @@ Index notes for semantic search.
 ```
 mode: "incremental"       # incremental (default) or full
 force: false              # force reindex even if TTL hasn't expired
+background: true          # optional; defaults to true for full mode
 ```
 
 Use `mode: "full"` to create the chunk index for better long-note search. First full index takes longer as it generates chunks, but subsequent searches run fast.
+
+For large vaults, prefer background indexing:
+
+#### `start-index-job`
+
+```
+mode: "full"               # full or incremental
+```
+
+Returns job snapshot including `id`, `status`, and `progress`.
+Progress updates in smaller steps across fetch/embed/persist phases.
+
+#### `get-index-job`
+
+```
+job_id: "<job-id>"
+```
+
+Poll until status is `completed`, `failed`, or `cancelled`.
+You may also see the transitional status `cancelling`.
+
+#### `list-index-jobs`
+
+```
+limit: 10                  # optional, 1-50
+```
+
+#### `cancel-index-job`
+
+```
+job_id: "<job-id>"
+```
+
+Requests best-effort cancellation for a running job. Cancellation is cooperative:
+- A long-running step must reach a cancellation checkpoint.
+- Partial work may remain.
+- You can safely start a new job after status becomes `cancelled`.
 
 #### `reindex-note`
 Re-index a single note after manual edits.
@@ -185,6 +233,9 @@ title: "New Note"
 content: "# Heading\n\nMarkdown content..."
 folder: "Work"            # optional, defaults to Notes
 ```
+
+After create/update/delete/move, the server auto-syncs vector and chunk indexes in best-effort mode.
+If sync partially fails, the tool response includes an `index sync warning`; run `reindex-note` or `index-notes`.
 
 #### `update-note`
 Update an existing note.
@@ -332,6 +383,15 @@ Set `READONLY_MODE=false` in `.env` to enable write operations.
 
 ### Notes missing from search
 Run `index-notes` to update the search index. Use `mode: full` if incremental misses changes.
+
+### "iCloud account not available" / `Can't get account "iCloud"`
+This error is from a different Apple Notes MCP implementation that uses tool name `search_notes` and argument `Keywords`.
+
+This project uses:
+- tool: `search-notes`
+- argument: `query`
+
+If your client calls `search_notes` with `Keywords`, update the MCP server config to point to `apple-notes-mcp` and restart your MCP client.
 
 ### JXA errors
 Ensure Apple Notes runs and contains notes. Grant automation permissions when prompted.

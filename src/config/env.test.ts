@@ -28,6 +28,8 @@ describe("validateEnv", () => {
     delete process.env.READONLY_MODE;
     delete process.env.EMBEDDING_DIMS;
     delete process.env.INDEX_TTL;
+    delete process.env.SEARCH_REFRESH_TIMEOUT_MS;
+    delete process.env.INDEX_JOB_RETENTION_SECONDS;
     const { validateEnv } = await import("./env.js");
     expect(() => validateEnv()).not.toThrow();
   });
@@ -52,6 +54,18 @@ describe("validateEnv", () => {
 
   it("validates DEBUG is boolean string", async () => {
     process.env.DEBUG = "yes";
+    const { validateEnv } = await import("./env.js");
+    expect(() => validateEnv()).toThrow();
+  });
+
+  it("validates SEARCH_REFRESH_TIMEOUT_MS is numeric", async () => {
+    process.env.SEARCH_REFRESH_TIMEOUT_MS = "not-a-number";
+    const { validateEnv } = await import("./env.js");
+    expect(() => validateEnv()).toThrow();
+  });
+
+  it("validates INDEX_JOB_RETENTION_SECONDS is numeric", async () => {
+    process.env.INDEX_JOB_RETENTION_SECONDS = "abc";
     const { validateEnv } = await import("./env.js");
     expect(() => validateEnv()).toThrow();
   });
