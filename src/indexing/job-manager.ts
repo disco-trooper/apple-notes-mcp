@@ -190,12 +190,11 @@ export function createIndexJobManager(
     }
   }
 
-  function getActiveJobByMode(mode: "full" | "incremental"): IndexJob | null {
+  function getActiveJob(): IndexJob | null {
     for (let i = order.length - 1; i >= 0; i -= 1) {
       const job = jobs.get(order[i]);
       if (!job) continue;
       if (
-        job.mode === mode &&
         (job.status === "queued" || job.status === "running" || job.status === "cancelling")
       ) {
         return job;
@@ -238,6 +237,10 @@ export function createIndexJobManager(
   async function run(jobId: string): Promise<void> {
     const job = jobs.get(jobId);
     if (!job) return;
+
+    if (job.status === "cancelled") {
+      return;
+    }
 
     const controller = new AbortController();
     controllers.set(jobId, controller);
@@ -287,7 +290,7 @@ export function createIndexJobManager(
   function start(options: StartIndexJobOptions): IndexJob {
     prune();
 
-    const existing = getActiveJobByMode(options.mode);
+    const existing = getActiveJob();
     if (existing) {
       return cloneJob(existing);
     }

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockVectorStore = {
   deleteByFolderAndTitle: vi.fn(),
+  deleteByIdAndFolderAndTitle: vi.fn(),
 };
 
 const mockChunkStore = {
@@ -70,7 +71,7 @@ describe("write-sync", () => {
       folder: "Work",
     });
 
-    expect(mockVectorStore.deleteByFolderAndTitle).toHaveBeenCalledWith("Work", "A");
+    expect(mockVectorStore.deleteByIdAndFolderAndTitle).toHaveBeenCalledWith("note-1", "Work", "A");
     expect(mockChunkStore.deleteChunksByNoteIds).toHaveBeenCalledWith(["note-1"]);
     expect(result.ok).toBe(true);
   });
@@ -86,7 +87,7 @@ describe("write-sync", () => {
       toFolder: "Archive",
     });
 
-    expect(mockVectorStore.deleteByFolderAndTitle).toHaveBeenCalledWith("Work", "A");
+    expect(mockVectorStore.deleteByIdAndFolderAndTitle).toHaveBeenCalledWith("note-1", "Work", "A");
     expect(reindexNote).toHaveBeenCalledWith("id:note-1");
     expect(result.ok).toBe(true);
   });
@@ -103,8 +104,30 @@ describe("write-sync", () => {
       titleChanged: true,
     });
 
-    expect(mockVectorStore.deleteByFolderAndTitle).toHaveBeenCalledWith("Work", "Old A");
+    expect(mockVectorStore.deleteByIdAndFolderAndTitle).toHaveBeenCalledWith("note-1", "Work", "Old A");
     expect(reindexNote).toHaveBeenCalledWith("id:note-1");
     expect(result.ok).toBe(true);
+  });
+
+  it("reindexes before stale cleanup on move", async () => {
+    const { syncAfterMove } = await import("./write-sync.js");
+    const { reindexNote } = await import("./indexer.js");
+
+    const order: string[] = [];
+    vi.mocked(reindexNote).mockImplementation(async () => {
+      order.push("reindex");
+    });
+    mockVectorStore.deleteByIdAndFolderAndTitle.mockImplementation(async () => {
+      order.push("cleanup");
+    });
+
+    await syncAfterMove({
+      id: "note-1",
+      title: "A",
+      fromFolder: "Work",
+      toFolder: "Archive",
+    });
+
+    expect(order).toEqual(["reindex", "cleanup"]);
   });
 });

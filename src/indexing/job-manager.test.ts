@@ -67,6 +67,24 @@ describe("job-manager", () => {
     expect(first.id).toBe(second.id);
   });
 
+  it("deduplicates active jobs across modes", async () => {
+    const unresolved = new Promise(() => {
+      // keep running
+    });
+
+    const manager = createIndexJobManager({
+      indexNotes: vi.fn().mockReturnValue(unresolved),
+      fullChunkIndex: vi.fn(),
+      now: () => Date.now(),
+      newId: () => crypto.randomUUID(),
+    });
+
+    const full = manager.start({ mode: "full" });
+    const incremental = manager.start({ mode: "incremental" });
+
+    expect(incremental.id).toBe(full.id);
+  });
+
   it("tracks failed job state and error message", async () => {
     const manager = createIndexJobManager({
       indexNotes: vi.fn().mockRejectedValue(new Error("boom")),
@@ -138,5 +156,30 @@ describe("job-manager", () => {
   it("returns null when cancelling unknown job", async () => {
     const manager = createIndexJobManager();
     expect(manager.cancel("missing")).toBeNull();
+  });
+
+  it("does not start a queued job after cancel", async () => {
+    const indexNotes = vi.fn().mockResolvedValue({
+      total: 0,
+      indexed: 0,
+      errors: 0,
+      timeMs: 1,
+    });
+
+    const manager = createIndexJobManager({
+      indexNotes,
+      fullChunkIndex: vi.fn(),
+      now: () => Date.now(),
+      newId: () => "q1",
+    });
+
+    const started = manager.start({ mode: "incremental" });
+    const cancelled = manager.cancel(started.id);
+    expect(cancelled?.status).toBe("cancelled");
+
+    await flushPromises();
+
+    expect(indexNotes).not.toHaveBeenCalled();
+    expect(manager.get(started.id)?.status).toBe("cancelled");
   });
 });

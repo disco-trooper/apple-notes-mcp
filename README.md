@@ -174,7 +174,7 @@ Index notes for semantic search.
 ```
 mode: "incremental"       # incremental (default) or full
 force: false              # force reindex even if TTL hasn't expired
-background: true          # optional; defaults to true for full mode
+background: false         # optional; defaults to false (synchronous mode)
 ```
 
 Use `mode: "full"` to create the chunk index for better long-note search. First full index takes longer as it generates chunks, but subsequent searches run fast.

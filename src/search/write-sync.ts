@@ -76,21 +76,24 @@ export async function syncAfterCreate(createResult: CreateResult): Promise<Write
 export async function syncAfterUpdate(updateResult: UpdateResult): Promise<WriteSyncResult> {
   const warnings: Array<string | null> = [];
 
-  // If title changed, remove stale vector entries under old folder/title key.
-  if (updateResult.titleChanged) {
+  const reindexWarning = await trySync("vector-reindex", async () => {
+    await reindexNote(`id:${updateResult.id}`);
+  });
+  warnings.push(reindexWarning);
+
+  // If title changed, remove stale vector entries only after successful reindex.
+  if (updateResult.titleChanged && reindexWarning === null) {
     warnings.push(
       await trySync("vector-delete-old-title", async () => {
         const store = getVectorStore();
-        await store.deleteByFolderAndTitle(updateResult.folder, updateResult.originalTitle);
+        await store.deleteByIdAndFolderAndTitle(
+          updateResult.id,
+          updateResult.folder,
+          updateResult.originalTitle
+        );
       })
     );
   }
-
-  warnings.push(
-    await trySync("vector-reindex", async () => {
-      await reindexNote(`id:${updateResult.id}`);
-    })
-  );
 
   warnings.push(await syncChunksForNoteId(updateResult.id));
 
@@ -103,7 +106,11 @@ export async function syncAfterDelete(deleteResult: DeleteResult): Promise<Write
   warnings.push(
     await trySync("vector-delete", async () => {
       const store = getVectorStore();
-      await store.deleteByFolderAndTitle(deleteResult.folder, deleteResult.title);
+      await store.deleteByIdAndFolderAndTitle(
+        deleteResult.id,
+        deleteResult.folder,
+        deleteResult.title
+      );
     })
   );
 
@@ -124,18 +131,23 @@ export async function syncAfterDelete(deleteResult: DeleteResult): Promise<Write
 export async function syncAfterMove(moveResult: MoveResult): Promise<WriteSyncResult> {
   const warnings: Array<string | null> = [];
 
-  warnings.push(
-    await trySync("vector-delete-old-folder", async () => {
-      const store = getVectorStore();
-      await store.deleteByFolderAndTitle(moveResult.fromFolder, moveResult.title);
-    })
-  );
+  const reindexWarning = await trySync("vector-reindex", async () => {
+    await reindexNote(`id:${moveResult.id}`);
+  });
+  warnings.push(reindexWarning);
 
-  warnings.push(
-    await trySync("vector-reindex", async () => {
-      await reindexNote(`id:${moveResult.id}`);
-    })
-  );
+  if (reindexWarning === null) {
+    warnings.push(
+      await trySync("vector-delete-old-folder", async () => {
+        const store = getVectorStore();
+        await store.deleteByIdAndFolderAndTitle(
+          moveResult.id,
+          moveResult.fromFolder,
+          moveResult.title
+        );
+      })
+    );
+  }
 
   warnings.push(await syncChunksForNoteId(moveResult.id));
 

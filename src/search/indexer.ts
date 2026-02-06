@@ -191,14 +191,9 @@ export async function fullIndex(options: IndexRunOptions = {}): Promise<IndexRes
 
   const store = getVectorStore();
 
-  // Phase 2: Clear existing index
-  debug("Phase 2: Clearing existing index...");
-  await store.clear();
-  throwIfCancelled(options.signal);
-
-  // Phase 3: Stream process in batches
+  // Phase 2: Stream process in batches
   const batchSize = getEmbeddingBatchSize();
-  debug(`Phase 3: Processing ${preparedNotes.length} notes in batches of ${batchSize}...`);
+  debug(`Phase 2: Processing ${preparedNotes.length} notes in batches of ${batchSize}...`);
 
   const batches = chunks(preparedNotes, batchSize);
   const indexedAt = new Date().toISOString();
@@ -261,8 +256,8 @@ export async function fullIndex(options: IndexRunOptions = {}): Promise<IndexRes
     );
   }
 
-  // Phase 4: Rebuild FTS index (once at end)
-  debug("Phase 4: Rebuilding FTS index...");
+  // Phase 3: Rebuild FTS index (once at end)
+  debug("Phase 3: Rebuilding FTS index...");
   if (totalIndexed > 0) {
     emitProgress(options, "rebuild-fts", 0, 1, "Rebuilding FTS index");
     await store.rebuildFtsIndex();

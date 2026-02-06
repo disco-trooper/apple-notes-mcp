@@ -280,7 +280,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             background: {
               type: "boolean",
-              description: "Run indexing as async background job (default: true for full mode)"
+              description: "Run indexing as async background job (default: false)"
             },
           },
           required: [],
@@ -673,7 +673,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const params = IndexNotesSchema.parse(args);
         const jobs = getIndexJobManager();
 
-        const runInBackground = params.background ?? (params.mode === "full");
+        const runInBackground = params.background ?? false;
         if (runInBackground) {
           const job = jobs.start({ mode: params.mode });
           return textResponse(
