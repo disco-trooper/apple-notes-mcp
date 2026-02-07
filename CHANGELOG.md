@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.1] - 2026-02-07
+
+### Fixed
+
+- `list-notes` with `folder` now queries only matching folders instead of loading all notes first
+- Preserved correctness for duplicate folder names across accounts by aggregating all matching folders
+
+### Changed
+
+- Improved `list-notes` folder performance by ~10x on larger vaults (single-folder lookup path)
+
 ## [1.8.0] - 2026-02-06
 
 ### Added
@@ -161,7 +172,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Read-only mode via `READONLY_MODE` env variable
 - Debug logging via `DEBUG` env variable
 
-[Unreleased]: https://github.com/disco-trooper/apple-notes-mcp/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/disco-trooper/apple-notes-mcp/compare/v1.8.1...HEAD
+[1.8.1]: https://github.com/disco-trooper/apple-notes-mcp/compare/v1.8.0...v1.8.1
+[1.8.0]: https://github.com/disco-trooper/apple-notes-mcp/compare/v1.7.0...v1.8.0
+[1.7.0]: https://github.com/disco-trooper/apple-notes-mcp/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/disco-trooper/apple-notes-mcp/compare/v1.5.1...v1.6.0
 [1.5.1]: https://github.com/disco-trooper/apple-notes-mcp/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/disco-trooper/apple-notes-mcp/compare/v1.4.0...v1.5.0
