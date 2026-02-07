@@ -620,7 +620,63 @@ export type { ListNotesOptions } from "../index.js";
 import type { ListNotesOptions } from "../index.js";
 
 /**
+ * Get notes metadata from a specific folder (no content).
+ * Much faster than getAllNotes() when only one folder is needed,
+ * because it skips iterating all other folders in JXA.
+ *
+ * @param folderName - The folder name (case-insensitive matching)
+ * @returns Array of note metadata from the specified folder
+ */
+export async function getNoteMetadataByFolder(folderName: string): Promise<NoteInfo[]> {
+  debug(`Getting note metadata for folder: ${folderName}`);
+
+  const escapedFolder = JSON.stringify(folderName);
+
+  const jxaCode = `
+    const app = Application('Notes');
+    app.includeStandardAdditions = true;
+
+    const targetFolder = ${escapedFolder}.toLowerCase();
+    const result = [];
+    const folders = app.folders();
+
+    for (const folder of folders) {
+      const folderName = folder.name();
+      if (folderName.toLowerCase() !== targetFolder) continue;
+
+      const notes = folder.notes();
+
+      for (const note of notes) {
+        try {
+          const props = note.properties();
+          result.push({
+            title: props.name || '',
+            folder: folderName,
+            created: props.creationDate ? props.creationDate.toISOString() : '',
+            modified: props.modificationDate ? props.modificationDate.toISOString() : ''
+          });
+        } catch (e) {
+          // Skip notes that can't be accessed
+        }
+      }
+    }
+
+    return JSON.stringify(result);
+  `;
+
+  const result = await executeJxa<string>(jxaCode);
+  const notes = JSON.parse(result) as NoteInfo[];
+
+  debug(`Found ${notes.length} notes in folder: ${folderName}`);
+  return notes;
+}
+
+/**
  * List notes with sorting and filtering.
+ *
+ * When a folder filter is provided, only that folder is queried via JXA
+ * instead of fetching all notes first. This is significantly faster for
+ * users with many notes spread across folders.
  *
  * @param options - Sorting and filtering options
  * @returns Array of note metadata sorted and filtered as specified
@@ -630,12 +686,9 @@ export async function listNotes(options: ListNotesOptions = {}): Promise<NoteInf
 
   debug(`Listing notes: sort_by=${sort_by}, order=${order}, limit=${limit}, folder=${folder}`);
 
-  const allNotes = await getAllNotes();
-
-  // Filter by folder (case-insensitive for better UX)
   const filtered = folder
-    ? allNotes.filter((n) => n.folder.toLowerCase() === folder.toLowerCase())
-    : allNotes;
+    ? await getNoteMetadataByFolder(folder)
+    : await getAllNotes();
 
   filtered.sort((a, b) => {
     let comparison: number;

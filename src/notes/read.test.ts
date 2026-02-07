@@ -6,7 +6,7 @@ vi.mock("run-jxa", () => ({
 }));
 
 import { runJxa } from "run-jxa";
-import { getAllNotes, getNoteByTitle, getAllFolders, resolveNoteTitle, listNotes } from "./read.js";
+import { getAllNotes, getNoteByTitle, getAllFolders, resolveNoteTitle, listNotes, getNoteMetadataByFolder } from "./read.js";
 
 describe("getAllNotes", () => {
   beforeEach(() => {
@@ -243,8 +243,12 @@ describe("listNotes", () => {
     expect(notes[2].title).toBe("Alpha");
   });
 
-  it("should filter by folder", async () => {
-    vi.mocked(runJxa).mockResolvedValueOnce(JSON.stringify(mockNotes));
+  it("should filter by folder (uses getNoteMetadataByFolder)", async () => {
+    const workNotes = [
+      { title: "Alpha", folder: "Work", created: "2024-01-01T00:00:00Z", modified: "2024-01-10T00:00:00Z" },
+      { title: "Gamma", folder: "Work", created: "2024-01-02T00:00:00Z", modified: "2024-01-15T00:00:00Z" },
+    ];
+    vi.mocked(runJxa).mockResolvedValueOnce(JSON.stringify(workNotes));
 
     const notes = await listNotes({ folder: "Work" });
     expect(notes).toHaveLength(2);
@@ -259,7 +263,11 @@ describe("listNotes", () => {
   });
 
   it("should combine folder filter and limit", async () => {
-    vi.mocked(runJxa).mockResolvedValueOnce(JSON.stringify(mockNotes));
+    const workNotes = [
+      { title: "Alpha", folder: "Work", created: "2024-01-01T00:00:00Z", modified: "2024-01-10T00:00:00Z" },
+      { title: "Gamma", folder: "Work", created: "2024-01-02T00:00:00Z", modified: "2024-01-15T00:00:00Z" },
+    ];
+    vi.mocked(runJxa).mockResolvedValueOnce(JSON.stringify(workNotes));
 
     const notes = await listNotes({ folder: "Work", limit: 1 });
     expect(notes).toHaveLength(1);
@@ -267,7 +275,7 @@ describe("listNotes", () => {
   });
 
   it("should return empty array when folder has no notes", async () => {
-    vi.mocked(runJxa).mockResolvedValueOnce(JSON.stringify(mockNotes));
+    vi.mocked(runJxa).mockResolvedValueOnce(JSON.stringify([]));
 
     const notes = await listNotes({ folder: "NonExistent" });
     expect(notes).toHaveLength(0);
@@ -343,5 +351,131 @@ describe("listNotes", () => {
     expect(notes[0].title).toBe("Empty");
     expect(notes[1].title).toBe("Old");
     expect(notes[2].title).toBe("Recent");
+  });
+});
+
+describe("getNoteMetadataByFolder", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("should return notes from the specified folder", async () => {
+    const folderNotes = [
+      { title: "Note A", folder: "Projects", created: "2024-01-01T00:00:00Z", modified: "2024-01-02T00:00:00Z" },
+      { title: "Note B", folder: "Projects", created: "2024-01-03T00:00:00Z", modified: "2024-01-04T00:00:00Z" },
+    ];
+    vi.mocked(runJxa).mockResolvedValueOnce(JSON.stringify(folderNotes));
+
+    const notes = await getNoteMetadataByFolder("Projects");
+    expect(notes).toHaveLength(2);
+    expect(notes[0].title).toBe("Note A");
+    expect(notes[1].folder).toBe("Projects");
+  });
+
+  it("should return empty array when folder has no notes", async () => {
+    vi.mocked(runJxa).mockResolvedValueOnce(JSON.stringify([]));
+
+    const notes = await getNoteMetadataByFolder("Empty");
+    expect(notes).toHaveLength(0);
+  });
+
+  it("should return metadata without content fields", async () => {
+    const folderNotes = [
+      { title: "Note", folder: "Work", created: "2024-01-01T00:00:00Z", modified: "2024-01-02T00:00:00Z" },
+    ];
+    vi.mocked(runJxa).mockResolvedValueOnce(JSON.stringify(folderNotes));
+
+    const notes = await getNoteMetadataByFolder("Work");
+    expect(notes[0]).toHaveProperty("title");
+    expect(notes[0]).toHaveProperty("folder");
+    expect(notes[0]).toHaveProperty("created");
+    expect(notes[0]).toHaveProperty("modified");
+    expect(notes[0]).not.toHaveProperty("content");
+    expect(notes[0]).not.toHaveProperty("htmlContent");
+    expect(notes[0]).not.toHaveProperty("id");
+  });
+
+  it("should aggregate notes from duplicate folder names", async () => {
+    const duplicateFolderNotes = [
+      { title: "A1", folder: "Work", created: "2024-01-01T00:00:00Z", modified: "2024-01-02T00:00:00Z" },
+      { title: "A2", folder: "Work", created: "2024-01-03T00:00:00Z", modified: "2024-01-04T00:00:00Z" },
+    ];
+    vi.mocked(runJxa).mockResolvedValueOnce(JSON.stringify(duplicateFolderNotes));
+
+    const notes = await getNoteMetadataByFolder("Work");
+    expect(notes).toHaveLength(2);
+    expect(notes.map((n) => n.title)).toEqual(["A1", "A2"]);
+
+    const jxaCode = vi.mocked(runJxa).mock.calls[0][0] as string;
+    expect(jxaCode).not.toContain("break;");
+  });
+});
+
+describe("listNotes folder optimization", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("should make only one JXA call when folder is specified", async () => {
+    const folderNotes = [
+      { title: "Note 1", folder: "xx", created: "2024-01-01T00:00:00Z", modified: "2024-01-02T00:00:00Z" },
+    ];
+    vi.mocked(runJxa).mockResolvedValueOnce(JSON.stringify(folderNotes));
+
+    await listNotes({ folder: "xx" });
+    expect(runJxa).toHaveBeenCalledTimes(1);
+
+    const jxaCode = vi.mocked(runJxa).mock.calls[0][0] as string;
+    expect(jxaCode).toContain("targetFolder");
+    expect(jxaCode).toContain("toLowerCase");
+  });
+
+  it("should not fetch all notes when folder is specified", async () => {
+    const folderNotes = [
+      { title: "Only One", folder: "Tiny", created: "2024-01-01T00:00:00Z", modified: "2024-01-02T00:00:00Z" },
+    ];
+    vi.mocked(runJxa).mockResolvedValueOnce(JSON.stringify(folderNotes));
+
+    const notes = await listNotes({ folder: "Tiny" });
+    expect(notes).toHaveLength(1);
+    expect(notes[0].title).toBe("Only One");
+  });
+
+  it("should use getAllNotes when no folder is specified", async () => {
+    const allNotes = [
+      { title: "A", folder: "Work", created: "2024-01-01T00:00:00Z", modified: "2024-01-02T00:00:00Z" },
+      { title: "B", folder: "Personal", created: "2024-01-03T00:00:00Z", modified: "2024-01-04T00:00:00Z" },
+    ];
+    vi.mocked(runJxa).mockResolvedValueOnce(JSON.stringify(allNotes));
+
+    const notes = await listNotes();
+    expect(notes).toHaveLength(2);
+    expect(runJxa).toHaveBeenCalledTimes(1);
+
+    const jxaCode = vi.mocked(runJxa).mock.calls[0][0] as string;
+    expect(jxaCode).not.toContain("targetFolder");
+  });
+
+  it("should still sort folder-filtered results", async () => {
+    const folderNotes = [
+      { title: "Old", folder: "Work", created: "2024-01-01T00:00:00Z", modified: "2024-01-05T00:00:00Z" },
+      { title: "New", folder: "Work", created: "2024-01-02T00:00:00Z", modified: "2024-01-15T00:00:00Z" },
+    ];
+    vi.mocked(runJxa).mockResolvedValueOnce(JSON.stringify(folderNotes));
+
+    const notes = await listNotes({ folder: "Work", sort_by: "modified", order: "desc" });
+    expect(notes[0].title).toBe("New");
+    expect(notes[1].title).toBe("Old");
+  });
+
+  it("should match folder case-insensitively in optimized path", async () => {
+    const workNotes = [
+      { title: "Case Note", folder: "Work", created: "2024-01-01T00:00:00Z", modified: "2024-01-02T00:00:00Z" },
+    ];
+    vi.mocked(runJxa).mockResolvedValueOnce(JSON.stringify(workNotes));
+
+    const notes = await listNotes({ folder: "work" });
+    expect(notes).toHaveLength(1);
+    expect(notes[0].folder).toBe("Work");
   });
 });

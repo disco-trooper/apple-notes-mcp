@@ -21,11 +21,11 @@ MCP server for Apple Notes with semantic search and CRUD operations. Claude sear
 - **Background Index Jobs** - Async full/incremental indexing with progress polling
 - **Dual Embedding** - Local HuggingFace or OpenRouter API
 
-## What's New in 1.7
+## What's New in 1.8.1
 
-- **Hybrid Fallback Indexing** - Recovers from failures by falling back: single call → folder batch → note-by-note
-- **Streaming Batches** - Processes embeddings in batches to reduce peak memory
-- **Skipped Notes Reporting** - Shows which notes failed (locked, syncing, corrupted)
+- **Faster `list-notes` folder filtering** - `list-notes` now queries only the requested folder instead of scanning all notes first
+- **Duplicate folder name correctness** - Folder filtering now aggregates matching folders across accounts
+- **Large vault performance** - Folder-scoped listing is significantly faster on larger note libraries
 
 ## Installation
 
@@ -130,6 +130,8 @@ order: "desc"            # asc or desc (default: desc)
 limit: 10                # max notes to return (1-100)
 folder: "Work"           # filter by folder (case-insensitive)
 ```
+
+When `folder` is provided, the server fetches only matching folders from Apple Notes. This keeps folder-scoped requests fast even when your vault has hundreds of notes.
 
 **Examples:**
 - Get 5 newest notes: `{ sort_by: "created", order: "desc", limit: 5 }`
