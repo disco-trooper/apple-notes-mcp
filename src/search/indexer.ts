@@ -175,7 +175,7 @@ export async function fullIndex(options: IndexRunOptions = {}): Promise<IndexRes
 
   // Phase 1: Fetch all notes with hybrid fallback
   debug("Phase 1: Fetching all notes (with fallback)...");
-  const { notes: allNotes, skipped: skippedNotes } = await getAllNotesWithFallback();
+  const { notes: allNotes, skipped: skippedNotes } = await getAllNotesWithFallback({ signal: options.signal, onBatch: (fetched) => emitProgress(options, 'fetch', fetched, Math.max(fetched, 1), `Fetched ${fetched} notes...`) });
   debug(`Fetched ${allNotes.length} notes, ${skippedNotes.length} skipped`);
   emitProgress(options, "fetch", 1, 1, `Fetched ${allNotes.length} notes`);
   throwIfCancelled(options.signal);
@@ -304,7 +304,7 @@ export async function incrementalIndex(options: IndexRunOptions = {}): Promise<I
 
   // Phase 1: Fetch ALL notes with content in batch (hybrid fallback)
   debug("Phase 1: Fetching all notes with fallback...");
-  const { notes: allNotesWithContent, skipped: skippedNotes } = await getAllNotesWithFallback();
+  const { notes: allNotesWithContent, skipped: skippedNotes } = await getAllNotesWithFallback({ signal: options.signal, onBatch: (fetched) => emitProgress(options, 'fetch', fetched, Math.max(fetched, 1), `Fetched ${fetched} notes...`) });
   debug(`Fetched ${allNotesWithContent.length} notes, skipped ${skippedNotes.length}`);
   emitProgress(options, "fetch", 1, 1, `Fetched ${allNotesWithContent.length} notes`);
   throwIfCancelled(options.signal);
