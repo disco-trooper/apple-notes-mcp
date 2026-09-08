@@ -164,7 +164,7 @@ export async function fullChunkIndex(options: IndexRunOptions = {}): Promise<Chu
 
   // Phase 1: Fetch all notes with hybrid fallback
   debug("Phase 1: Fetching all notes with fallback...");
-  const { notes, skipped: skippedNotes } = await getAllNotesWithFallback();
+  const { notes, skipped: skippedNotes } = await getAllNotesWithFallback({ signal: options.signal, onBatch: (fetched) => emitProgress(options, 'fetch', fetched, Math.max(fetched, 1), `Fetched ${fetched} notes...`) });
   debug(`Fetched ${notes.length} notes, skipped ${skippedNotes.length}`);
   emitProgress(options, "fetch", 1, 1, `Fetched ${notes.length} notes`);
   throwIfCancelled(options.signal);

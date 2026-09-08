@@ -52,6 +52,8 @@ export const DEFAULT_CHUNK_OVERLAP = 100;
 
 // Batch processing
 export const DEFAULT_EMBEDDING_BATCH_SIZE = 50;
+export const DEFAULT_NOTES_FETCH_BATCH_SIZE = 100;
+export const DEFAULT_JXA_TIMEOUT_MS = 120000;
 
 // Background indexing jobs
 export const DEFAULT_INDEX_JOB_RETENTION_SECONDS = 3600;
@@ -70,4 +72,34 @@ export function getEmbeddingBatchSize(): number {
     }
   }
   return DEFAULT_EMBEDDING_BATCH_SIZE;
+}
+
+/**
+ * Get notes fetch batch size from environment or use default.
+ * Lower values reduce peak memory usage but increase processing time.
+ */
+export function getNotesFetchBatchSize(): number {
+  const envValue = process.env.NOTES_FETCH_BATCH_SIZE;
+  if (envValue) {
+    const parsed = parseInt(envValue, 10);
+    if (!isNaN(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
+  return DEFAULT_NOTES_FETCH_BATCH_SIZE;
+}
+
+/**
+ * Get JXA execution timeout in milliseconds from environment or use default.
+ * Bounds how long a single Apple Notes JXA call may run before it is aborted.
+ */
+export function getJxaTimeoutMs(): number {
+  const envValue = process.env.JXA_TIMEOUT_MS;
+  if (envValue) {
+    const parsed = parseInt(envValue, 10);
+    if (!isNaN(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
+  return DEFAULT_JXA_TIMEOUT_MS;
 }
