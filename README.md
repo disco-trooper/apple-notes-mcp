@@ -21,6 +21,12 @@ MCP server for Apple Notes with semantic search and CRUD operations. Claude sear
 - **Background Index Jobs** - Async full/incremental indexing with progress polling
 - **Dual Embedding** - Local HuggingFace or OpenRouter API
 
+## What's New in 1.9.0
+
+- **Large library indexing** - Fetch reads note properties in bulk batches, so indexing thousands of notes finishes instead of stalling
+- **Resilient fetch** - Locked or syncing notes are retried per batch and skipped with a report instead of failing the run
+- **Cancellable reads** - Long Notes reads time out (`JXA_TIMEOUT_MS`) and cancellation actually stops the fetch
+
 ## What's New in 1.8.1
 
 - **Faster `list-notes` folder filtering** - `list-notes` now queries only the requested folder instead of scanning all notes first
@@ -81,6 +87,8 @@ Configuration stored in `~/.apple-notes-mcp/.env`:
 | `SEARCH_REFRESH_TIMEOUT_MS` | Max time search waits for refresh before using stale index | `2000` |
 | `INDEX_JOB_RETENTION_SECONDS` | How long completed/failed index jobs remain queryable | `3600` |
 | `EMBEDDING_BATCH_SIZE` | Batch size for embedding generation | `50` |
+| `NOTES_FETCH_BATCH_SIZE` | Batch size for Notes fetch | `100` |
+| `JXA_TIMEOUT_MS` | Max time for a single Notes read in milliseconds | `120000` |
 | `DEBUG` | Enable debug logging | `false` |
 
 ### Search Auto-Refresh Policy

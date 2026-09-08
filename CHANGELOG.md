@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-09-08
+
+### Added
+
+- `NOTES_FETCH_BATCH_SIZE` environment variable - Tune Notes fetch batch size for large libraries (default: 100)
+- `JXA_TIMEOUT_MS` environment variable - Cap how long a single Notes read may take before it is retried or skipped (default: 120000)
+- Indexing fetch now reports per-batch progress instead of a static fetch stage
+
+### Fixed
+
+- Indexer fetch uses bulk property reads over batched `folder.notes` slices instead of per-note Apple Events, so indexing 5000+ note libraries finishes instead of hanging (#8)
+- A failing batch (locked, syncing, or corrupted note) falls back to per-note reads for that batch only and never fails the whole fetch
+- Notes reads now time out and are retried or skipped instead of hanging indefinitely; `cancel-index-job` no longer sticks in `cancelling`
+- Folder list shifts mid-fetch (folder created or deleted) remap the batch index instead of silently skipping the remaining folders
+
 ## [1.8.2] - 2026-02-07
 
 ### Fixed
@@ -178,7 +193,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Read-only mode via `READONLY_MODE` env variable
 - Debug logging via `DEBUG` env variable
 
-[Unreleased]: https://github.com/disco-trooper/apple-notes-mcp/compare/v1.8.2...HEAD
+[Unreleased]: https://github.com/disco-trooper/apple-notes-mcp/compare/v1.9.0...HEAD
+[1.9.0]: https://github.com/disco-trooper/apple-notes-mcp/compare/v1.8.2...v1.9.0
 [1.8.2]: https://github.com/disco-trooper/apple-notes-mcp/compare/v1.8.1...v1.8.2
 [1.8.1]: https://github.com/disco-trooper/apple-notes-mcp/compare/v1.8.0...v1.8.1
 [1.8.0]: https://github.com/disco-trooper/apple-notes-mcp/compare/v1.7.0...v1.8.0
