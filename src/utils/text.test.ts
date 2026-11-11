@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { truncateForEmbedding } from "./text.js";
+import { generatePreview, truncateForEmbedding } from "./text.js";
 import { MAX_INPUT_LENGTH } from "../config/constants.js";
 
 describe("truncateForEmbedding", () => {
@@ -28,5 +28,19 @@ describe("truncateForEmbedding", () => {
   it("should handle text exactly at limit", () => {
     const text = "a".repeat(MAX_INPUT_LENGTH);
     expect(truncateForEmbedding(text)).toBe(text);
+  });
+});
+
+describe("generatePreview", () => {
+  it("collapses whitespace and keeps short text whole", () => {
+    expect(generatePreview("  Short\n\ntext  ")).toBe("Short text");
+  });
+
+  it("cuts long text at a word boundary", () => {
+    expect(generatePreview("alpha beta gamma delta", 12)).toBe("alpha beta...");
+  });
+
+  it("hard-cuts when no word boundary is near the limit", () => {
+    expect(generatePreview("a".repeat(300), 200)).toBe("a".repeat(200) + "...");
   });
 });

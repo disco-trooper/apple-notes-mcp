@@ -41,24 +41,16 @@ function getModelName(): string {
 }
 
 /**
- * Check if the model is an E5 model that requires prefixed input.
+ * Embedding role. e5 models are trained with asymmetric prefixes:
+ * "query: " for search queries and "passage: " for indexed documents.
  */
-function isE5Model(): boolean {
-  return getModelName().toLowerCase().includes("e5");
-}
+export type EmbeddingRole = "query" | "passage";
 
 /**
- * Prepare text for embedding by adding E5 prefix if needed.
+ * Add the e5 role prefix when the configured model is an e5 model.
  */
-function prepareText(text: string): string {
-  return isE5Model() ? `passage: ${text}` : text;
-}
-
-/**
- * Prepare multiple texts for embedding by adding E5 prefix if needed.
- */
-function prepareTexts(texts: string[]): string[] {
-  return isE5Model() ? texts.map(t => `passage: ${t}`) : texts;
+function prepareText(text: string, role: EmbeddingRole): string {
+  return getModelName().toLowerCase().includes("e5") ? `${role}: ${text}` : text;
 }
 
 /**
@@ -93,7 +85,8 @@ async function getPipeline(): Promise<FeatureExtractionPipeline> {
         "feature-extraction",
         modelName,
         {
-          // Use quantized model for faster loading and inference
+          // Full precision. Changing dtype changes the vectors, so any existing
+          // index would have to be fully re-embedded.
           dtype: "fp32",
         }
       );
@@ -123,10 +116,11 @@ async function getPipeline(): Promise<FeatureExtractionPipeline> {
  * Uses mean pooling and L2 normalization for best results with e5/MiniLM models.
  *
  * @param text - The text to embed
+ * @param role - "query" for search queries, "passage" for indexed content
  * @returns Promise resolving to embedding vector (number array)
  * @throws Error if model loading or inference fails
  */
-export async function getLocalEmbedding(text: string): Promise<number[]> {
+export async function getLocalEmbedding(text: string, role: EmbeddingRole = "passage"): Promise<number[]> {
   if (!text || typeof text !== "string") {
     throw new Error("Text must be a non-empty string");
   }
@@ -137,7 +131,7 @@ export async function getLocalEmbedding(text: string): Promise<number[]> {
   const startTime = Date.now();
 
   try {
-    const output = await pipe(prepareText(text), {
+    const output = await pipe(prepareText(text, role), {
       pooling: "mean",
       normalize: true,
     });
@@ -185,15 +179,7 @@ export function getLocalModelName(): string {
 }
 
 /**
- * Check if the model has been loaded.
- * Useful for diagnostics without triggering a load.
- */
-export function isModelLoaded(): boolean {
-  return pipelineInstance !== null;
-}
-
-/**
- * Generate embeddings for multiple texts in a single batch call.
+ * Generate passage embeddings for multiple texts in a single batch call.
  * More efficient than calling getLocalEmbedding for each text individually.
  *
  * @param texts - Array of texts to embed
@@ -211,7 +197,7 @@ export async function getLocalEmbeddingBatch(texts: string[]): Promise<number[][
   const startTime = Date.now();
 
   try {
-    const output = await pipe(prepareTexts(texts), {
+    const output = await pipe(texts.map((t) => prepareText(t, "passage")), {
       pooling: "mean",
       normalize: true,
     });

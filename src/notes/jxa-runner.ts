@@ -1,25 +1,27 @@
 /**
- * Killable JXA runner for Apple Notes automation.
+ * Single entry point for every Apple Notes JXA call (reads and writes).
  *
- * Replaces `run-jxa` on the notes read path. `run-jxa` spawns `osascript`
- * without a timeout or abort signal, so a slow Notes call left the child
- * hammering Notes in the background after the caller gave up waiting. This
- * runner passes `timeout` and `signal` straight to `node:child_process`
- * execFile, so a timeout or AbortSignal truly kills the child process.
+ * `executeJxa` spawns `osascript -l JavaScript` with `timeout` and `signal`
+ * passed straight to `node:child_process` execFile, so a timeout or abort
+ * really kills the child instead of leaving it hammering Notes after the
+ * caller gave up.
  *
- * Wire format mirrors run-jxa: the snippet is wrapped in a zero-arg function
- * (so top-level `return ...` in caller code keeps working), invoked
- * immediately, and its return value is JSON-encoded between two marker lines
- * on stderr (osascript forwards JXA console.log to stderr). The markers are
- * own constants; no new npm dependencies.
+ * The script travels on the child's stdin, never as an argv element: write
+ * payloads embed whole note bodies, and macOS caps argv+env (ARG_MAX), so a
+ * large note sent via `-e` would fail with E2BIG.
+ *
+ * Wire format: the snippet is wrapped in a zero-arg function (so top-level
+ * `return ...` in caller code works), invoked immediately, and its return
+ * value is JSON-encoded between two marker strings on stderr (osascript
+ * forwards JXA console.log to stderr). The markers carry a per-call nonce
+ * and the end marker is searched from the end, so note content can never
+ * truncate the payload.
  */
 
 import { execFile } from "node:child_process";
-
-/** Prefix marking the start of the JSON payload on osascript stderr. */
-export const JXA_RESULT_PREFIX = "@@[apple-notes-mcp-jxa-result]@@";
-/** Postfix marking the end of the JSON payload on osascript stderr. */
-export const JXA_RESULT_POSTFIX = "##[apple-notes-mcp-jxa-result]##";
+import { randomUUID } from "node:crypto";
+import { getJxaTimeoutMs } from "../config/constants.js";
+import { IndexCancelledError } from "../indexing/contracts.js";
 
 /** Generous stdio cap: a full batch of notes with bodies must fit easily. */
 const MAX_JXA_BUFFER_BYTES = 64 * 1024 * 1024;
@@ -27,11 +29,14 @@ const MAX_JXA_BUFFER_BYTES = 64 * 1024 * 1024;
 /** Characters of process output tail kept in error messages. */
 const ERROR_TAIL_CHARS = 2000;
 
-export interface RunJxaWithKillOptions {
-  /** Per-call timeout in milliseconds; the osascript child is killed past it. */
-  timeoutMs: number;
+/** execFile error code when stdout/stderr outgrow maxBuffer. */
+const MAX_BUFFER_CODE = "ERR_CHILD_PROCESS_STDIO_MAXBUFFER";
+
+export interface JxaRunOptions {
   /** AbortSignal that kills the osascript child when aborted. */
   signal?: AbortSignal;
+  /** Per-call timeout in milliseconds. Defaults to getJxaTimeoutMs(). */
+  timeoutMs?: number;
 }
 
 /** execFile failure with the process output attached for diagnosis. */
@@ -42,17 +47,28 @@ interface ExecFailure {
   stderr: string;
 }
 
+interface ResultMarkers {
+  prefix: string;
+  postfix: string;
+}
+
+function createMarkers(): ResultMarkers {
+  const nonce = randomUUID();
+  return {
+    prefix: `@@[apple-notes-mcp-jxa-result:${nonce}]@@`,
+    postfix: `##[apple-notes-mcp-jxa-result:${nonce}]##`,
+  };
+}
+
 /**
- * Wrap caller JXA the way run-jxa does: a zero-arg function body plus a
- * marked console.log carrying the JSON-encoded return value.
+ * Wrap caller JXA as a zero-arg function plus a marked console.log carrying
+ * the JSON-encoded return value.
  */
-function wrapAsJxaScript(code: string): string {
-  const functionString = `function(){const args=[].slice.call(arguments);\n${code}\n}`;
-  const functionCall = `(${functionString})()`;
-  const output = `JSON.stringify({data: ${functionCall}})`;
+function wrapAsJxaScript(code: string, markers: ResultMarkers): string {
+  const functionCall = `(function(){\n${code}\n})()`;
   return (
-    `console.log(${JSON.stringify(JXA_RESULT_PREFIX)} + ${output} + ` +
-    `${JSON.stringify(JXA_RESULT_POSTFIX)});`
+    `console.log(${JSON.stringify(markers.prefix)} + ` +
+    `JSON.stringify({data: ${functionCall}}) + ${JSON.stringify(markers.postfix)});`
   );
 }
 
@@ -63,27 +79,32 @@ function tailOf(text: string | undefined): string {
   const trimmed = text.trim();
   return trimmed.length > ERROR_TAIL_CHARS ? `…${trimmed.slice(-ERROR_TAIL_CHARS)}` : trimmed;
 }
-/** execFile promise wrapper that surfaces stderr on failure. */
+
+/**
+ * The script's own error from osascript stderr: `execution error: Error:
+ * Error: Folder not found: X (-2700)` becomes `Folder not found: X`. Falls
+ * back to the stderr tail when the line has another shape.
+ */
+function scriptErrorOf(stderr: string | undefined): string {
+  const match = stderr?.match(/execution error: (?:Error: )*([\s\S]*?) \(-?\d+\)\s*$/);
+  return match ? match[1].trim() : tailOf(stderr);
+}
+
+/** Spawn osascript, feed the script on stdin, surface stderr on failure. */
 function execOsascript(
   script: string,
   timeoutMs: number,
   signal?: AbortSignal
-): Promise<{ stdout: string; stderr: string }> {
-  // Deliberately the executor form, not Promise.withResolvers: the package
-  // still supports Node 18 (see engines) and compiles against ES2022 lib,
-  // neither of which provides withResolvers.
+): Promise<string> {
+  // Executor form, not Promise.withResolvers: the package supports Node 18.
   return new Promise((resolve, reject) => {
-    // The script travels as an argv `-e` argument (no shell involved), so
-    // no `input`/stdin plumbing is needed and quoting is a non-issue.
-    execFile(
+    const child = execFile(
       "osascript",
-      ["-l", "JavaScript", "-e", script],
+      ["-l", "JavaScript"],
       { timeout: timeoutMs, signal, maxBuffer: MAX_JXA_BUFFER_BYTES },
-      (error, stdout, stderr) => {
-        const out = typeof stdout === "string" ? stdout : String(stdout ?? "");
+      (error, _stdout, stderr) => {
         const err = typeof stderr === "string" ? stderr : String(stderr ?? "");
         if (error) {
-          // ExecFileException already types code/killed; no cast needed.
           const failure: ExecFailure = {
             message: error.message,
             code: error.code ?? null,
@@ -93,20 +114,22 @@ function execOsascript(
           reject(failure);
           return;
         }
-        resolve({ stdout: out, stderr: err });
+        resolve(err);
       }
     );
+    // A child killed early (timeout/abort) closes stdin: EPIPE is reported
+    // through the execFile callback, so the stream error itself is ignored.
+    child.stdin?.on("error", () => {});
+    child.stdin?.end(script);
   });
 }
 
-/** Narrow an execOsascript rejection back to its failure shape. */
 function isExecFailure(value: unknown): value is ExecFailure {
   return (
     !!value &&
     typeof value === "object" &&
     "message" in value &&
     typeof value.message === "string" &&
-    "code" in value &&
     "killed" in value &&
     typeof value.killed === "boolean" &&
     "stderr" in value &&
@@ -114,70 +137,77 @@ function isExecFailure(value: unknown): value is ExecFailure {
   );
 }
 
-/** Extract the JSON payload between the result markers on stderr. */
-function extractJxaResult(stderr: string): string {
-  const start = stderr.indexOf(JXA_RESULT_PREFIX);
-  const end =
-    start === -1
-      ? -1
-      : stderr.indexOf(JXA_RESULT_POSTFIX, start + JXA_RESULT_PREFIX.length);
-  if (start === -1 || end === -1) {
+/** Extract the snippet's return value between this call's markers. */
+function extractJxaResult(stderr: string, markers: ResultMarkers): string {
+  const start = stderr.indexOf(markers.prefix);
+  const end = start === -1 ? -1 : stderr.lastIndexOf(markers.postfix);
+  if (start === -1 || end < start + markers.prefix.length) {
     throw new Error(
-      `JXA result markers not found in osascript output (stderr tail: ${tailOf(stderr) || "<empty>"})`
+      `JXA execution failed: result markers not found in osascript output (stderr tail: ${tailOf(stderr) || "<empty>"})`
     );
   }
-  const payload = stderr.slice(start + JXA_RESULT_PREFIX.length, end);
+  const payload = stderr.slice(start + markers.prefix.length, end);
   let parsed: unknown;
   try {
     parsed = JSON.parse(payload);
   } catch {
-    throw new Error(`JXA result is not valid JSON (payload tail: ${tailOf(payload) || "<empty>"})`);
+    throw new Error(
+      `JXA execution failed: result is not valid JSON (payload tail: ${tailOf(payload) || "<empty>"})`
+    );
   }
   if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && "data" in parsed) {
     const data: unknown = parsed.data;
     return typeof data === "string" ? data : JSON.stringify(data ?? null);
   }
-  throw new Error(`JXA result has no data field (payload tail: ${tailOf(payload) || "<empty>"})`);
+  throw new Error(
+    `JXA execution failed: result has no data field (payload tail: ${tailOf(payload) || "<empty>"})`
+  );
 }
 
 /**
- * Run JXA via osascript, killing the child on timeout or abort.
+ * Run a JXA snippet via osascript, killing the child on timeout or abort.
  *
- * Resolves with the snippet's return value: snippets in this codebase
- * `return JSON.stringify(...)`, so callers get that JSON string back (the
- * same shape `run-jxa` produced, hence a plain string here).
+ * Resolves with the snippet's return value as a string: snippets in this
+ * codebase `return JSON.stringify(...)`, so callers JSON.parse the result.
+ * A non-string return value is JSON-encoded.
  *
- * Rejects with an Error containing `cancelled` when aborted (including an
- * already-aborted signal), or `timed out after <ms>ms` plus a
- * NOTES_FETCH_BATCH_SIZE hint on timeout. A missing result marker or a
- * non-zero osascript exit rejects with the stderr tail attached.
+ * @throws IndexCancelledError when the signal is aborted (before or during the call)
+ * @throws Error "JXA execution timed out after <ms>ms" on timeout
+ * @throws Error "JXA execution failed: ..." on output overflow, a non-zero
+ * osascript exit (message carries the stderr tail, i.e. the script's own
+ * error), or a missing/corrupt result payload
  */
-export async function runJxaWithKill(code: string, opts: RunJxaWithKillOptions): Promise<string> {
-  const { timeoutMs, signal } = opts;
+export async function executeJxa<T = string>(code: string, opts?: JxaRunOptions): Promise<T> {
+  const timeoutMs = opts?.timeoutMs ?? getJxaTimeoutMs();
+  const signal = opts?.signal;
+
   if (signal?.aborted) {
-    throw new Error("JXA execution cancelled before start (cancelled)");
+    throw new IndexCancelledError("JXA execution cancelled before start");
   }
-  const script = wrapAsJxaScript(code);
-  let stderr = "";
+
+  const markers = createMarkers();
+  let stderr: string;
   try {
-    const result = await execOsascript(script, timeoutMs, signal);
-    stderr = result.stderr;
+    stderr = await execOsascript(wrapAsJxaScript(code, markers), timeoutMs, signal);
   } catch (thrown: unknown) {
     if (signal?.aborted) {
-      throw new Error("JXA execution cancelled (cancelled)");
+      throw new IndexCancelledError("JXA execution cancelled");
     }
     const failure = isExecFailure(thrown) ? thrown : null;
     const message = failure?.message ?? String(thrown);
-    const timedOut =
-      failure?.code === "ETIMEDOUT" || /timed out/i.test(message) || failure?.killed === true;
-    if (timedOut) {
+    if (failure?.code === MAX_BUFFER_CODE) {
       throw new Error(
-        `JXA execution timed out after ${timeoutMs}ms. ` +
-          `Try lowering NOTES_FETCH_BATCH_SIZE (or the batchSize option) to reduce per-call work.`
+        `JXA execution failed: osascript output exceeded ${MAX_JXA_BUFFER_BYTES / (1024 * 1024)} MiB. ` +
+          `Lower NOTES_FETCH_BATCH_SIZE to reduce per-call output.`
       );
     }
-    const tail = tailOf(failure?.stderr);
-    throw new Error(`osascript failed: ${message}${tail ? ` (stderr tail: ${tail})` : ""}`);
+    if (failure?.killed === true || failure?.code === "ETIMEDOUT") {
+      throw new Error(
+        `JXA execution timed out after ${timeoutMs}ms. ` +
+          `Raise JXA_TIMEOUT_MS, or lower NOTES_FETCH_BATCH_SIZE for bulk reads.`
+      );
+    }
+    throw new Error(`JXA execution failed: ${scriptErrorOf(failure?.stderr) || message}`);
   }
-  return extractJxaResult(stderr);
+  return extractJxaResult(stderr, markers) as T;
 }

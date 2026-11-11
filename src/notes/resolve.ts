@@ -1,27 +1,28 @@
 /**
- * Note title resolution and disambiguation.
+ * Note and folder resolution.
  *
- * Handles resolving user input (title, folder/title, id:xxx) to a specific note.
+ * Turns user input (`title`, `folder/title`, `id:xxx`) into one specific
+ * note, and hosts the JXA folder helpers every folder-addressing script
+ * shares. This is the only place that looks notes up by title.
  */
 
-import { runJxa } from "run-jxa";
 import { createDebugLogger } from "../utils/debug.js";
 import type { NoteSuggestion } from "../errors/index.js";
-import { getNoteById } from "./read.js";
+import { executeJxa } from "./jxa-runner.js";
 
 const debug = createDebugLogger("NOTES");
 
 /**
- * Result of resolving a note title to a specific note.
+ * Result of resolving user input to a specific note.
  */
 export interface ResolvedNote {
   /** Whether resolution was successful */
   success: boolean;
   /** The matched note (if exactly one match) */
   note?: {
+    id: string;
     title: string;
     folder: string;
-    id: string;
   };
   /** Error message if resolution failed */
   error?: string;
@@ -29,29 +30,163 @@ export interface ResolvedNote {
   suggestions?: NoteSuggestion[];
 }
 
-/**
- * Execute JXA code safely with error handling.
- */
-async function executeJxa<T>(code: string): Promise<T> {
-  try {
-    const result = await runJxa(code);
-    return result as T;
-  } catch (error) {
-    debug("JXA execution error:", error);
-    throw new Error(
-      `JXA execution failed: ${error instanceof Error ? error.message : String(error)}`
-    );
-  }
+/** One interpretation of user input: a title, optionally scoped to a folder. */
+export interface NoteLookupCandidate {
+  title: string;
+  /** Folder reference (leaf name, nested path, or `Account/path`); null = any folder */
+  folder: string | null;
 }
 
 /**
- * Resolve a note title input to a unique note.
+ * JXA helpers shared by every script that addresses folders. Expects `app`
+ * (Application('Notes')) in scope.
+ *
+ * - `folderPathInfo(f)`: leaf name, nested path (`Parent/Child`) and account
+ *   name. `app.folders()` is flat (nested folders included), so the path is
+ *   rebuilt from the `container()` chain.
+ * - `folderMatches(f, ref)`: `ref` is the leaf name, the nested path, or
+ *   `Account/path`.
+ * - `findFolder(ref, label)`: exactly one folder or a thrown Error. A name
+ *   shared by several folders (e.g. "Notes" in iCloud and On My Mac) throws
+ *   with every `Account/path`, which the caller can pass back to pick one.
+ */
+export const FOLDER_JXA_HELPERS = `
+    function folderPathInfo(f) {
+      const parts = [f.name()];
+      let c = f.container();
+      for (let guard = 0; guard < 64 && c.properties().pcls === 'folder'; guard++) {
+        parts.unshift(c.name());
+        c = c.container();
+      }
+      let account = '';
+      try { account = c.name(); } catch (accountErr) {}
+      return { leaf: parts[parts.length - 1], path: parts.join('/'), account: account };
+    }
+
+    function folderMatches(f, ref) {
+      if (f.name() === ref) {
+        return true;
+      }
+      const info = folderPathInfo(f);
+      return ref === info.path || ref === info.account + '/' + info.path;
+    }
+
+    function findFolder(ref, label) {
+      let hits = app.folders.whose({ name: ref })();
+      if (hits.length === 0 && ref.indexOf('/') !== -1) {
+        hits = app.folders().filter(function (f) {
+          const info = folderPathInfo(f);
+          return ref === info.path || ref === info.account + '/' + info.path;
+        });
+      }
+      if (hits.length === 0) {
+        throw new Error(label + ' not found: ' + ref);
+      }
+      if (hits.length > 1) {
+        const where = hits.map(function (f) {
+          const info = folderPathInfo(f);
+          return info.account + '/' + info.path;
+        });
+        throw new Error('Multiple folders match "' + ref + '": ' + where.join(', ') +
+          '. Use the "Account/Folder" form to pick one.');
+      }
+      return hits[0];
+    }
+`;
+
+/**
+ * Interpretations of title input, most literal first: the whole input as a
+ * title, then every `/` split point from right to left (folder = left part,
+ * title = right part). Splits with an empty folder or title are skipped, so
+ * titles like "2024/05/12 Standup" stay resolvable.
+ */
+export function buildLookupCandidates(input: string): NoteLookupCandidate[] {
+  const candidates: NoteLookupCandidate[] = [{ title: input, folder: null }];
+  const parts = input.split("/");
+  for (let i = parts.length - 1; i >= 1; i--) {
+    const folder = parts.slice(0, i).join("/");
+    const title = parts.slice(i).join("/");
+    if (folder.length > 0 && title.length > 0) {
+      candidates.push({ title, folder });
+    }
+  }
+  return candidates;
+}
+
+/**
+ * JXA that tries each candidate in order and stops at the first one with
+ * matches. Returns JSON: one array of `{ id, title, folder, created }`
+ * matches per tried candidate. Uses bulk getters on the `whose` result;
+ * only the folder needs a per-match lookup.
+ */
+function buildFindNotesJxa(candidates: NoteLookupCandidate[]): string {
+  return `
+    const app = Application('Notes');
+    const candidates = ${JSON.stringify(candidates)};
+    ${FOLDER_JXA_HELPERS}
+
+    const results = [];
+    for (const cand of candidates) {
+      const found = [];
+      const matches = app.notes.whose({ name: cand.title });
+      const ids = matches.id();
+      const names = ids.length > 0 ? matches.name() : [];
+      const createdList = ids.length > 0 ? matches.creationDate() : [];
+      for (let i = 0; i < ids.length; i++) {
+        try {
+          const folder = app.notes.byId(ids[i]).container();
+          if (cand.folder !== null && !folderMatches(folder, cand.folder)) {
+            continue;
+          }
+          const created = createdList[i];
+          found.push({
+            id: ids[i],
+            title: names[i] || '',
+            folder: folder.name(),
+            created: created ? created.toISOString() : ''
+          });
+        } catch (noteErr) {
+          // Skip notes that can't be accessed
+        }
+      }
+      results.push(found);
+      if (found.length > 0) {
+        break;
+      }
+    }
+
+    return JSON.stringify(results);
+  `;
+}
+
+/** JXA returning `{ id, title, folder }` for a note id, or null. No body read. */
+function buildNoteRefByIdJxa(id: string): string {
+  return `
+    const app = Application('Notes');
+    const note = app.notes.byId(${JSON.stringify(id)});
+    if (!note.exists()) {
+      return JSON.stringify(null);
+    }
+    return JSON.stringify({ id: note.id(), title: note.name(), folder: note.container().name() });
+  `;
+}
+
+interface NoteMatch {
+  id: string;
+  title: string;
+  folder: string;
+  created: string;
+}
+
+/**
+ * Resolve user input to a unique note.
  *
  * Handles:
- * - "id:xxx" format for direct ID lookup
- * - Exact title match
- * - "folder/title" format for disambiguation
- * - Returns suggestions when multiple matches exist
+ * - "id:xxx" for direct ID lookup
+ * - the whole input as an exact title (titles may contain "/")
+ * - "folder/title", where folder is a leaf name, nested path or
+ *   "Account/path"; tried at every "/" when the whole input matches nothing
+ * - suggestions (id, folder, created) when several notes match
  *
  * @param input - The note title, "folder/title", or "id:xxx" string
  * @returns Resolution result with success status, note info, or suggestions
@@ -59,116 +194,46 @@ async function executeJxa<T>(code: string): Promise<T> {
 export async function resolveNoteTitle(input: string): Promise<ResolvedNote> {
   debug(`Resolving note title: ${input}`);
 
-  // Check for id:xxx format for direct ID lookup
   if (input.startsWith("id:")) {
     const noteId = input.slice(3);
-    debug(`ID prefix detected, looking up note by ID: ${noteId}`);
-    const noteDetails = await getNoteById(noteId);
-    if (!noteDetails) {
-      return {
-        success: false,
-        error: `Note not found with ID: "${noteId}"`,
-      };
+    const note = JSON.parse(await executeJxa<string>(buildNoteRefByIdJxa(noteId))) as
+      | { id: string; title: string; folder: string }
+      | null;
+    if (!note) {
+      return { success: false, error: `Note not found with ID: "${noteId}"` };
     }
-    return {
-      success: true,
-      note: {
-        id: noteDetails.id,
-        title: noteDetails.title,
-        folder: noteDetails.folder,
-      },
-    };
+    return { success: true, note };
   }
 
-  // Check for folder/title format
-  let targetFolder: string | null = null;
-  let targetTitle = input;
+  const candidates = buildLookupCandidates(input);
+  const perCandidate = JSON.parse(
+    await executeJxa<string>(buildFindNotesJxa(candidates))
+  ) as NoteMatch[][];
+  const matchIndex = perCandidate.findIndex((found) => found.length > 0);
 
-  if (input.includes("/")) {
-    const parts = input.split("/");
-    targetFolder = parts.slice(0, -1).join("/");
-    targetTitle = parts[parts.length - 1];
-    debug(`Parsed folder: ${targetFolder}, title: ${targetTitle}`);
-  }
-
-  const escapedTitle = JSON.stringify(targetTitle);
-  const escapedFolder = targetFolder ? JSON.stringify(targetFolder) : "null";
-
-  const jxaCode = `
-    const app = Application('Notes');
-    app.includeStandardAdditions = true;
-
-    const targetTitle = ${escapedTitle};
-    const targetFolder = ${escapedFolder};
-
-    let foundNotes = [];
-    const folders = app.folders();
-
-    for (const folder of folders) {
-      const folderName = folder.name();
-
-      // Skip if folder filter is specified and doesn't match
-      if (targetFolder !== null && folderName !== targetFolder) {
-        continue;
-      }
-
-      const notes = folder.notes.whose({ name: targetTitle });
-
-      for (let i = 0; i < notes.length; i++) {
-        try {
-          const note = notes[i];
-          const props = note.properties();
-          foundNotes.push({
-            id: note.id(),
-            title: note.name(),
-            folder: folderName,
-            created: props.creationDate ? props.creationDate.toISOString() : ''
-          });
-        } catch (e) {
-          // Skip notes that can't be accessed
-        }
-      }
-    }
-
-    return JSON.stringify(foundNotes);
-  `;
-
-  const result = await executeJxa<string>(jxaCode);
-  const notes = JSON.parse(result) as Array<{
-    id: string;
-    title: string;
-    folder: string;
-    created: string;
-  }>;
-
-  if (notes.length === 0) {
+  if (matchIndex === -1) {
     debug("No matching notes found");
-    return {
-      success: false,
-      error: `Note not found: "${input}"`,
-    };
+    return { success: false, error: `Note not found: "${input}"` };
   }
 
+  const notes = perCandidate[matchIndex];
   if (notes.length === 1) {
-    debug(`Resolved to unique note: ${notes[0].folder}/${notes[0].title}`);
-    return {
-      success: true,
-      note: notes[0],
-    };
+    const { id, title, folder } = notes[0];
+    debug(`Resolved to unique note: ${folder}/${title}`);
+    return { success: true, note: { id, title, folder } };
   }
 
-  // Multiple matches - return rich suggestions with ID and created date
   const suggestions: NoteSuggestion[] = notes.map((n) => ({
     id: n.id,
     folder: n.folder,
     title: n.title,
     created: n.created,
   }));
-  debug(`Multiple matches found: ${suggestions.map(s => `${s.folder}/${s.title}`).join(", ")}`);
+  debug(`Multiple matches found: ${suggestions.map((s) => `${s.folder}/${s.title}`).join(", ")}`);
 
   return {
     success: false,
-    error: `Multiple notes found with title "${targetTitle}". Use ID prefix to specify.`,
+    error: `Multiple notes found with title "${candidates[matchIndex].title}". Use ID prefix to specify.`,
     suggestions,
   };
 }

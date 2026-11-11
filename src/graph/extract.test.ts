@@ -1,6 +1,7 @@
 // src/graph/extract.test.ts
 import { describe, it, expect } from "vitest";
 import { extractTags, extractOutlinks, extractMetadata } from "./extract.js";
+import { htmlToMarkdown } from "../notes/conversion.js";
 
 describe("extractTags", () => {
   it("extracts simple hashtags", () => {
@@ -37,9 +38,30 @@ describe("extractTags", () => {
     expect(extractTags(content)).toEqual(["tag"]);
   });
 
-  it("ignores hex colors", () => {
-    const content = "Color #fff and #000000 and #a1b2c3 are not tags";
+  it("ignores hex colors that contain a digit", () => {
+    const content = "Color #000 and #a1b2c3 and #ff0000cc are not tags";
     expect(extractTags(content)).toEqual([]);
+  });
+
+  it("keeps words made of hex letters", () => {
+    expect(extractTags("#bad #cafe #fade #fff")).toEqual(["bad", "cafe", "fade", "fff"]);
+  });
+
+  it("keeps Unicode letters", () => {
+    expect(extractTags("#práce #škola #Žluťoučký")).toEqual(["práce", "škola", "žluťoučký"]);
+  });
+
+  it("ignores URL fragments, mid-word hashes and HTML entities", () => {
+    const content = "See https://a.b/c#frag and foo#bar and &#123; but #real";
+    expect(extractTags(content)).toEqual(["real"]);
+  });
+
+  it("ignores purely numeric references", () => {
+    expect(extractTags("issue #42 and #2024")).toEqual([]);
+  });
+
+  it("drops trailing hyphens", () => {
+    expect(extractTags("#todo- next")).toEqual(["todo"]);
   });
 
   it("keeps tags that contain letters mixed with numbers", () => {
@@ -77,6 +99,10 @@ describe("extractOutlinks", () => {
     const content = "Real [[Link]]\n```\n[[not-a-link]]\n```";
     expect(extractOutlinks(content)).toEqual(["Link"]);
   });
+
+  it("resolves aliases and heading anchors to the note title", () => {
+    expect(extractOutlinks("[[Title|alias]] [[Other#Heading]] [[Title]]")).toEqual(["Title", "Other"]);
+  });
 });
 
 describe("extractMetadata", () => {
@@ -85,6 +111,18 @@ describe("extractMetadata", () => {
     expect(extractMetadata(content)).toEqual({
       tags: ["project"],
       outlinks: ["Other Note"],
+    });
+  });
+});
+
+describe("extractMetadata on htmlToMarkdown output", () => {
+  it("finds tags and links that Turndown backslash-escapes", () => {
+    const markdown = htmlToMarkdown(
+      "<div>[[Meeting Notes]] #my_tag #práce #bad</div><div>[[Plan|the plan]] https://x.com/p#sec</div>"
+    );
+    expect(extractMetadata(markdown)).toEqual({
+      tags: ["my_tag", "práce", "bad"],
+      outlinks: ["Meeting Notes", "Plan"],
     });
   });
 });

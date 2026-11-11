@@ -1,44 +1,72 @@
 /**
  * Error message sanitization for client responses.
+ *
+ * Typed domain errors and validation errors carry messages written for the
+ * user, so they are returned in full. Anything else is reduced to its first
+ * line and replaced entirely when it looks like an internal failure
+ * (absolute filesystem paths, stack frames, programming errors).
  */
 
+import { ZodError } from "zod";
 import { ERROR_MESSAGE_MAX_LENGTH } from "../config/constants.js";
+import { DuplicateNoteError, NoteNotFoundError, ReadOnlyModeError } from "../errors/index.js";
+import { IndexCancelledError } from "../indexing/contracts.js";
 
-const SAFE_ERROR_PATTERNS = [
-  /^Note not found/,
-  /^Title must be/,
-  /^Title cannot be/,
-  /^Title exceeds/,
-  /^Title contains/,
-  /^Invalid arguments/,
-  /^Query cannot be empty/,
-  /^READONLY_MODE is enabled/,
-  /^Add confirm: true/,
-  /^Multiple notes found/,
-  /^Folder not found/,
+const INTERNAL_ERROR_MESSAGE = "An internal error occurred";
+
+const EXPOSED_ERROR_TYPES = [
+  NoteNotFoundError,
+  DuplicateNoteError,
+  ReadOnlyModeError,
+  IndexCancelledError,
 ];
+
+const INTERNAL_ERROR_TYPES = [TypeError, ReferenceError, SyntaxError, RangeError];
+
+/** Multi-line messages that are safe and useless when cut to their first line. */
+const MULTILINE_SAFE_PATTERNS = [/^Invalid environment configuration/];
 
 const INTERNAL_ERROR_PATTERNS = [
-  /\/[a-zA-Z]+\/[a-zA-Z]+\//,
-  /at\s+\S+\s+\(/,
+  // Absolute filesystem path (macOS/Unix roots), bare or inside a file:// URL.
+  // Notes folder paths such as "Work/Projects/Note" are relative and stay visible.
+  /(?:^|[\s"'`(=:,[]|file:\/\/)\/(?:Users|home|private|var|tmp|opt|usr|etc|Library|System|Applications|Volumes)\//,
+  /\n\s+at\s/,
   /:\d+:\d+\)/,
-  /TypeError:/,
-  /ReferenceError:/,
-  /ENOENT:/,
-  /EACCES:/,
+  /\b(?:TypeError|ReferenceError|SyntaxError|RangeError):/,
+  /\b(?:ENOENT|EACCES|EPERM|EISDIR|ENOTDIR):/,
 ];
 
-export function sanitizeErrorMessage(message: string): string {
-  for (const pattern of SAFE_ERROR_PATTERNS) {
-    if (pattern.test(message)) {
-      return message;
-    }
+/** Format zod issues as "path: message", omitting the path for root-level issues. */
+export function formatZodIssues(error: ZodError): string {
+  return error.issues
+    .map((issue) => (issue.path.length > 0 ? `${issue.path.join(".")}: ${issue.message}` : issue.message))
+    .join(", ");
+}
+
+/**
+ * Turn any thrown value into a message that is safe to send to the MCP client.
+ */
+export function sanitizeErrorMessage(error: unknown): string {
+  if (error instanceof ZodError) {
+    return `Invalid arguments: ${formatZodIssues(error)}`;
   }
 
-  for (const pattern of INTERNAL_ERROR_PATTERNS) {
-    if (pattern.test(message)) {
-      return "An internal error occurred";
-    }
+  if (EXPOSED_ERROR_TYPES.some((type) => error instanceof type)) {
+    return (error as Error).message;
+  }
+
+  if (INTERNAL_ERROR_TYPES.some((type) => error instanceof type)) {
+    return INTERNAL_ERROR_MESSAGE;
+  }
+
+  const message = error instanceof Error ? error.message : String(error);
+
+  if (MULTILINE_SAFE_PATTERNS.some((pattern) => pattern.test(message))) {
+    return message;
+  }
+
+  if (INTERNAL_ERROR_PATTERNS.some((pattern) => pattern.test(message))) {
+    return INTERNAL_ERROR_MESSAGE;
   }
 
   const firstLine = message.split("\n")[0];

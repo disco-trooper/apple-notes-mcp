@@ -1,41 +1,49 @@
 /**
  * Apple Notes CRUD operations using JXA (JavaScript for Automation).
  *
- * All write operations respect READONLY_MODE environment variable.
- * Content is converted from Markdown to HTML before writing to Apple Notes.
+ * All write operations respect READONLY_MODE. Content is converted from
+ * Markdown to HTML before writing to Apple Notes. Every script runs through
+ * the killable runner (timeout + stdin delivery) in ./jxa-runner.js.
  */
 
-import { runJxa } from "run-jxa";
 import { marked } from "marked";
-import { resolveNoteTitle } from "./read.js";
+import { executeJxa } from "./jxa-runner.js";
+import { resolveNoteTitle, FOLDER_JXA_HELPERS } from "./resolve.js";
+import { applyTableEdits } from "./tables.js";
 import { createDebugLogger } from "../utils/debug.js";
-import { findTables, updateTableCell } from "./tables.js";
+import { envFlag } from "../config/env.js";
 import { ReadOnlyModeError, NoteNotFoundError, DuplicateNoteError } from "../errors/index.js";
 
 // Debug logging
 const debug = createDebugLogger("CRUD");
 
+/** Identity of a note touched by a write: enough to sync the search index. */
+export interface NoteRef {
+  id: string;
+  title: string;
+  folder: string;
+}
+
 /**
  * Check if READONLY_MODE is enabled and throw if so.
  * Call this at the start of every write operation.
  *
- * @throws Error if READONLY_MODE=true
+ * @throws ReadOnlyModeError if READONLY_MODE is enabled
  */
 export function checkReadOnly(): void {
-  if (process.env.READONLY_MODE === "true") {
+  if (envFlag("READONLY_MODE")) {
     throw new ReadOnlyModeError();
   }
 }
 
 /**
- * Resolve note title and throw if not found.
- * Consolidates the repeated error handling pattern.
+ * Resolve user input to exactly one note.
  *
- * @param title - Note title (supports folder prefix)
- * @returns The resolved note with id, title, and folder
- * @throws Error if note not found or duplicates exist without folder prefix
+ * @param title - Note title, "folder/title" or "id:xxx"
+ * @throws DuplicateNoteError when several notes match
+ * @throws NoteNotFoundError when nothing matches
  */
-async function resolveNoteOrThrow(title: string): Promise<{ id: string; title: string; folder: string }> {
+async function resolveNoteOrThrow(title: string): Promise<NoteRef> {
   const resolved = await resolveNoteTitle(title);
 
   if (!resolved.success || !resolved.note) {
@@ -59,14 +67,44 @@ function markdownToHtml(markdown: string): string {
   }) as string;
 }
 
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 /**
- * Create a new note in Apple Notes.
+ * Body HTML for a new note. Apple Notes names a note after the first line
+ * of its body, so the title becomes an `<h1>` first line unless the
+ * content already starts with it (plain or as a Markdown heading).
+ */
+function buildNewNoteHtml(title: string, content: string): string {
+  const firstLine = content.trimStart().split("\n", 1)[0] ?? "";
+  const leading = firstLine.replace(/^#{1,6}\s+/, "").trim();
+  const body = markdownToHtml(content);
+  return leading === title.trim() ? body : `<h1>${escapeHtml(title)}</h1>${body}`;
+}
+
+export interface CreateResult {
+  id: string;
+  title: string;
+  folder: string;
+  requestedTitle: string;
+  titleChanged: boolean;
+}
+
+/**
+ * Create a new note in Apple Notes. Duplicate titles are allowed (notes are
+ * identified by id).
  *
- * @param title - Note title
+ * @param title - Note title; written as the first line so Apple Notes keeps it
  * @param content - Note content (Markdown)
- * @param folder - Optional target folder (defaults to Notes)
- * @throws Error if READONLY_MODE is enabled
- * @throws Error if note with same title already exists
+ * @param folder - Optional target folder: name, nested path or "Account/Folder"
+ * (defaults to the default account's default folder)
+ * @throws ReadOnlyModeError if READONLY_MODE is enabled
+ * @throws Error if the folder is missing or its name matches several folders
  */
 export async function createNote(
   title: string,
@@ -75,37 +113,22 @@ export async function createNote(
 ): Promise<CreateResult> {
   checkReadOnly();
 
-  debug(`Creating note: "${title}" in folder: "${folder || "Notes"}"`);
+  debug(`Creating note: "${title}" in folder: "${folder || "<default>"}"`);
 
-  // Convert Markdown to HTML
-  const htmlContent = markdownToHtml(content);
-  const escapedTitle = JSON.stringify(title);
-  const escapedContent = JSON.stringify(htmlContent);
-  const escapedFolder = folder ? JSON.stringify(folder) : "null";
-
+  const htmlContent = buildNewNoteHtml(title, content);
   debug(`HTML content length: ${htmlContent.length}`);
 
-  const result = await runJxa(`
+  const result = await executeJxa<string>(`
     const app = Application('Notes');
-    const title = ${escapedTitle};
-    const content = ${escapedContent};
-    const folderName = ${escapedFolder};
+    const title = ${JSON.stringify(title)};
+    const content = ${JSON.stringify(htmlContent)};
+    const folderName = ${folder ? JSON.stringify(folder) : "null"};
+    ${FOLDER_JXA_HELPERS}
 
-    let targetFolder = null;
+    const targetFolder = folderName
+      ? findFolder(folderName, 'Folder')
+      : app.defaultAccount().defaultFolder();
 
-    if (folderName) {
-      // Find the specified folder
-      const folders = app.folders.whose({name: folderName})();
-      if (folders.length === 0) {
-        throw new Error("Folder not found: " + folderName);
-      }
-      targetFolder = folders[0];
-    } else {
-      // Use default folder (first account's default folder)
-      targetFolder = app.defaultAccount().defaultFolder();
-    }
-
-    // Create the note in the target folder
     const note = app.Note({name: title, body: content});
     targetFolder.notes.push(note);
 
@@ -114,13 +137,9 @@ export async function createNote(
       title: note.name(),
       folder: targetFolder.name(),
     });
-  `) as string;
+  `);
 
-  const created = JSON.parse(result) as {
-    id: string;
-    title: string;
-    folder: string;
-  };
+  const created = JSON.parse(result) as NoteRef;
 
   debug(`Note created: "${created.folder}/${created.title}"`);
 
@@ -133,17 +152,9 @@ export async function createNote(
   };
 }
 
-export interface CreateResult {
-  id: string;
-  title: string;
-  folder: string;
-  requestedTitle: string;
-  titleChanged: boolean;
-}
-
 /**
  * Result of an update operation.
- * Apple Notes may rename the note based on content (first h1 heading).
+ * Apple Notes may rename the note based on content (first line).
  */
 export interface UpdateResult {
   /** Note ID */
@@ -161,15 +172,13 @@ export interface UpdateResult {
 /**
  * Update an existing note's content.
  *
- * Note: Apple Notes may automatically rename the note based on the first
- * heading in the content. The returned UpdateResult contains the actual
- * title after the update.
+ * Apple Notes renames the note after the first line of the new content;
+ * the returned UpdateResult carries the actual title after the update.
  *
- * @param title - Note title (supports folder prefix: "Work/My Note")
+ * @param title - Note title, "folder/title" or "id:xxx"
  * @param content - New content (Markdown)
- * @returns UpdateResult with original and new title
- * @throws Error if READONLY_MODE is enabled
- * @throws Error if note not found or duplicate titles without folder prefix
+ * @throws ReadOnlyModeError if READONLY_MODE is enabled
+ * @throws NoteNotFoundError / DuplicateNoteError if the title doesn't resolve to one note
  */
 export async function updateNote(title: string, content: string): Promise<UpdateResult> {
   checkReadOnly();
@@ -177,63 +186,51 @@ export async function updateNote(title: string, content: string): Promise<Update
   debug(`Updating note: "${title}"`);
 
   const note = await resolveNoteOrThrow(title);
-  const originalTitle = note.title;
-  const folder = note.folder;
-
-  // Convert Markdown to HTML
   const htmlContent = markdownToHtml(content);
-  const escapedNoteId = JSON.stringify(note.id);
-  const escapedContent = JSON.stringify(htmlContent);
 
   debug(`HTML content length: ${htmlContent.length}`);
 
-  // Update the note and get its new title (Apple Notes may rename it)
-  const result = await runJxa(`
+  const result = await executeJxa<string>(`
     const app = Application('Notes');
-    const noteId = ${escapedNoteId};
-    const content = ${escapedContent};
-
-    // Find the note by ID
-    const note = app.notes.byId(noteId);
-
+    const note = app.notes.byId(${JSON.stringify(note.id)});
     if (!note.exists()) {
       throw new Error("Note no longer exists");
     }
 
-    // Update the body
-    note.body = content;
+    note.body = ${JSON.stringify(htmlContent)};
 
-    // Return the current title (may have changed)
     return JSON.stringify({ newTitle: note.name() });
-  `) as string;
+  `);
 
-  const { newTitle } = JSON.parse(result);
-  const titleChanged = newTitle !== originalTitle;
+  const { newTitle } = JSON.parse(result) as { newTitle: string };
+  const titleChanged = newTitle !== note.title;
 
   if (titleChanged) {
-    debug(`Note renamed by Apple Notes: "${originalTitle}" -> "${newTitle}"`);
+    debug(`Note renamed by Apple Notes: "${note.title}" -> "${newTitle}"`);
   } else {
     debug(`Note updated: "${title}"`);
   }
 
   return {
     id: note.id,
-    originalTitle,
+    originalTitle: note.title,
     newTitle,
-    folder,
+    folder: note.folder,
     titleChanged,
   };
 }
 
+export type DeleteResult = NoteRef;
+
 /**
  * Delete a note from Apple Notes.
  *
- * IMPORTANT: The caller must verify that confirm=true before calling this function.
- * This function does NOT check the confirm parameter.
+ * The caller must verify confirm=true before calling; this function does
+ * not check it.
  *
- * @param title - Note title (supports folder prefix: "Work/My Note")
- * @throws Error if READONLY_MODE is enabled
- * @throws Error if note not found or duplicate titles without folder prefix
+ * @param title - Note title, "folder/title" or "id:xxx"
+ * @throws ReadOnlyModeError if READONLY_MODE is enabled
+ * @throws NoteNotFoundError / DuplicateNoteError if the title doesn't resolve to one note
  */
 export async function deleteNote(title: string): Promise<DeleteResult> {
   checkReadOnly();
@@ -241,90 +238,20 @@ export async function deleteNote(title: string): Promise<DeleteResult> {
   debug(`Deleting note: "${title}"`);
 
   const note = await resolveNoteOrThrow(title);
-  const escapedNoteId = JSON.stringify(note.id);
 
-  await runJxa(`
+  await executeJxa(`
     const app = Application('Notes');
-    const noteId = ${escapedNoteId};
-
-    // Find the note by ID
-    const note = app.notes.byId(noteId);
-
+    const note = app.notes.byId(${JSON.stringify(note.id)});
     if (!note.exists()) {
       throw new Error("Note no longer exists");
     }
-
-    // Delete the note
     note.delete();
-
     return "ok";
   `);
 
   debug(`Note deleted: "${title}"`);
 
-  return {
-    id: note.id,
-    title: note.title,
-    folder: note.folder,
-  };
-}
-
-export interface DeleteResult {
-  id: string;
-  title: string;
-  folder: string;
-}
-
-/**
- * Move a note to a different folder.
- *
- * @param title - Note title (supports folder prefix: "Work/My Note")
- * @param folder - Target folder name
- * @throws Error if READONLY_MODE is enabled
- * @throws Error if note not found or target folder not found
- */
-export async function moveNote(title: string, folder: string): Promise<MoveResult> {
-  checkReadOnly();
-
-  debug(`Moving note: "${title}" to folder: "${folder}"`);
-
-  const note = await resolveNoteOrThrow(title);
-  const escapedNoteId = JSON.stringify(note.id);
-  const escapedFolder = JSON.stringify(folder);
-
-  await runJxa(`
-    const app = Application('Notes');
-    const noteId = ${escapedNoteId};
-    const folderName = ${escapedFolder};
-
-    // Find the target folder
-    const folders = app.folders.whose({name: folderName})();
-    if (folders.length === 0) {
-      throw new Error("Folder not found: " + folderName);
-    }
-    const targetFolder = folders[0];
-
-    // Find the note by ID
-    const note = app.notes.byId(noteId);
-
-    if (!note.exists()) {
-      throw new Error("Note no longer exists");
-    }
-
-    // Move the note to the target folder
-    note.move({to: targetFolder});
-
-    return "ok";
-  `);
-
-  debug(`Note moved: "${title}" -> "${folder}"`);
-
-  return {
-    id: note.id,
-    title: note.title,
-    fromFolder: note.folder,
-    toFolder: folder,
-  };
+  return note;
 }
 
 export interface MoveResult {
@@ -332,6 +259,49 @@ export interface MoveResult {
   title: string;
   fromFolder: string;
   toFolder: string;
+}
+
+/**
+ * Move a note to a different folder.
+ *
+ * @param title - Note title, "folder/title" or "id:xxx"
+ * @param folder - Target folder: name, nested path or "Account/Folder"
+ * @throws ReadOnlyModeError if READONLY_MODE is enabled
+ * @throws NoteNotFoundError / DuplicateNoteError if the title doesn't resolve to one note
+ * @throws Error if the target folder is missing or its name matches several folders
+ */
+export async function moveNote(title: string, folder: string): Promise<MoveResult> {
+  checkReadOnly();
+
+  debug(`Moving note: "${title}" to folder: "${folder}"`);
+
+  const note = await resolveNoteOrThrow(title);
+
+  const result = await executeJxa<string>(`
+    const app = Application('Notes');
+    ${FOLDER_JXA_HELPERS}
+
+    const targetFolder = findFolder(${JSON.stringify(folder)}, 'Folder');
+    const note = app.notes.byId(${JSON.stringify(note.id)});
+    if (!note.exists()) {
+      throw new Error("Note no longer exists");
+    }
+
+    note.move({to: targetFolder});
+
+    return JSON.stringify({ toFolder: targetFolder.name() });
+  `);
+
+  const { toFolder } = JSON.parse(result) as { toFolder: string };
+
+  debug(`Note moved: "${title}" -> "${toFolder}"`);
+
+  return {
+    id: note.id,
+    title: note.title,
+    fromFolder: note.folder,
+    toFolder,
+  };
 }
 
 export interface TableEdit {
@@ -343,68 +313,71 @@ export interface TableEdit {
 /**
  * Edit cells in a table within a note.
  *
- * @param title - Note title (supports folder prefix)
+ * Read-modify-write over two JXA calls: the write re-checks the note's
+ * modification date and aborts when the note changed in between (sync,
+ * user typing), so concurrent edits are never overwritten.
+ *
+ * @param title - Note title, "folder/title" or "id:xxx"
  * @param tableIndex - Which table to edit (0-based)
- * @param edits - Array of cell edits to apply
+ * @param edits - Cell edits to apply
+ * @returns The edited note (title as Apple Notes reports it after the write)
+ * @throws ReadOnlyModeError if READONLY_MODE is enabled
+ * @throws Error on out-of-range table/row/column or a concurrent modification
  */
 export async function editTable(
   title: string,
   tableIndex: number,
   edits: TableEdit[]
-): Promise<void> {
+): Promise<NoteRef> {
   checkReadOnly();
 
   debug(`Editing table ${tableIndex} in note: "${title}"`);
 
   const note = await resolveNoteOrThrow(title);
   const escapedNoteId = JSON.stringify(note.id);
-  const htmlResult = await runJxa(`
-    const app = Application('Notes');
-    const note = app.notes.byId(${escapedNoteId});
-    if (!note.exists()) {
-      throw new Error("Note no longer exists");
-    }
-    return JSON.stringify({ html: note.body() });
-  `);
 
-  const { html } = JSON.parse(htmlResult as string);
+  const snapshot = JSON.parse(
+    await executeJxa<string>(`
+      const app = Application('Notes');
+      const note = app.notes.byId(${escapedNoteId});
+      if (!note.exists()) {
+        throw new Error("Note no longer exists");
+      }
+      const modified = note.modificationDate();
+      return JSON.stringify({ html: note.body(), modified: modified ? modified.toISOString() : '' });
+    `)
+  ) as { html: string; modified: string };
 
-  // Find all tables
-  const tables = findTables(html);
-  if (tableIndex >= tables.length) {
-    throw new Error(
-      `Table index ${tableIndex} out of bounds (note has ${tables.length} tables)`
-    );
-  }
+  const updatedHtml = applyTableEdits(snapshot.html, tableIndex, edits);
 
-  // Apply edits to the target table
-  let updatedTable = tables[tableIndex];
-  for (const edit of edits) {
-    updatedTable = updateTableCell(updatedTable, edit.row, edit.column, edit.value);
-  }
-
-  // Replace the table in the full HTML
-  const updatedHtml = html.replace(tables[tableIndex], updatedTable);
-
-  // Save back to Apple Notes
-  const escapedHtml = JSON.stringify(updatedHtml);
-  await runJxa(`
-    const app = Application('Notes');
-    const note = app.notes.byId(${escapedNoteId});
-    note.body = ${escapedHtml};
-    return "ok";
-  `);
+  const written = JSON.parse(
+    await executeJxa<string>(`
+      const app = Application('Notes');
+      const note = app.notes.byId(${escapedNoteId});
+      if (!note.exists()) {
+        throw new Error("Note no longer exists");
+      }
+      const current = note.modificationDate();
+      if ((current ? current.toISOString() : '') !== ${JSON.stringify(snapshot.modified)}) {
+        throw new Error("Note was modified while the table edit was prepared; nothing was written. Retry the edit.");
+      }
+      note.body = ${JSON.stringify(updatedHtml)};
+      return JSON.stringify({ title: note.name(), folder: note.container().name() });
+    `)
+  ) as { title: string; folder: string };
 
   debug(`Table ${tableIndex} updated in note: "${title}"`);
+
+  return { id: note.id, title: written.title, folder: written.folder };
 }
 
 /**
- * Result of a batch operation.
+ * Result of a batch delete.
  */
-export interface BatchResult {
-  /** Number of notes successfully processed */
-  deleted: number;
-  /** Notes that failed to process */
+export interface BatchDeleteResult {
+  /** Notes that were deleted */
+  deleted: NoteRef[];
+  /** Inputs (titles, or note names in folder mode) that could not be deleted */
   failed: string[];
 }
 
@@ -414,7 +387,7 @@ export interface BatchResult {
 export interface BatchDeleteOptions {
   /** List of note titles (supports folder/title and id:xxx formats) */
   titles?: string[];
-  /** Delete all notes in this folder */
+  /** Delete all notes in this folder (name, nested path or "Account/Folder") */
   folder?: string;
 }
 
@@ -422,12 +395,12 @@ export interface BatchDeleteOptions {
  * Delete multiple notes at once.
  *
  * @param options - Either titles array OR folder name (not both)
- * @returns BatchResult with deleted count and failed notes
- * @throws Error if READONLY_MODE is enabled
- * @throws Error if both titles and folder provided
- * @throws Error if neither titles nor folder provided
+ * @returns Deleted notes plus per-note failures
+ * @throws ReadOnlyModeError if READONLY_MODE is enabled
+ * @throws Error if both or neither of titles/folder are provided
+ * @throws Error if the folder is missing or its name matches several folders
  */
-export async function batchDelete(options: BatchDeleteOptions): Promise<BatchResult> {
+export async function batchDelete(options: BatchDeleteOptions): Promise<BatchDeleteResult> {
   checkReadOnly();
 
   const { titles, folder } = options;
@@ -440,49 +413,45 @@ export async function batchDelete(options: BatchDeleteOptions): Promise<BatchRes
     throw new Error("Specify either titles or folder");
   }
 
-  const result: BatchResult = { deleted: 0, failed: [] };
+  const result: BatchDeleteResult = { deleted: [], failed: [] };
 
   if (folder) {
-    // Delete all notes in folder via single JXA call
     debug(`Batch deleting all notes in folder: "${folder}"`);
 
-    const escapedFolder = JSON.stringify(folder);
-    const jxaResult = await runJxa(`
+    // Ids are captured first, then each note is deleted by id, so the loop
+    // never depends on index positions shifting under it.
+    const jxaResult = await executeJxa<string>(`
       const app = Application('Notes');
-      const folderName = ${escapedFolder};
+      ${FOLDER_JXA_HELPERS}
 
-      const folders = app.folders.whose({name: folderName})();
-      if (folders.length === 0) {
-        throw new Error("Folder not found: " + folderName);
-      }
+      const folder = findFolder(${JSON.stringify(folder)}, 'Folder');
+      const folderName = folder.name();
+      const ids = folder.notes.id();
+      const names = folder.notes.name();
+      const deleted = [];
+      const failed = [];
 
-      const folder = folders[0];
-      const notes = folder.notes();
-      let deletedCount = 0;
-
-      // Delete in reverse order to avoid index shifting
-      for (let i = notes.length - 1; i >= 0; i--) {
+      for (let i = 0; i < ids.length; i++) {
         try {
-          notes[i].delete();
-          deletedCount++;
+          app.notes.byId(ids[i]).delete();
+          deleted.push({ id: ids[i], title: names[i] || '', folder: folderName });
         } catch (e) {
-          // Continue on individual failures
+          failed.push(names[i] || ids[i]);
         }
       }
 
-      return JSON.stringify({ deletedCount });
+      return JSON.stringify({ deleted: deleted, failed: failed });
     `);
 
-    const { deletedCount } = JSON.parse(jxaResult as string);
-    result.deleted = deletedCount;
+    const parsed = JSON.parse(jxaResult) as BatchDeleteResult;
+    result.deleted = parsed.deleted;
+    result.failed = parsed.failed;
   } else if (titles) {
-    // Delete individual notes
     debug(`Batch deleting ${titles.length} notes by title`);
 
     for (const title of titles) {
       try {
-        await deleteNote(title);
-        result.deleted++;
+        result.deleted.push(await deleteNote(title));
       } catch (error) {
         result.failed.push(title);
         debug(`Failed to delete "${title}":`, error);
@@ -490,7 +459,7 @@ export async function batchDelete(options: BatchDeleteOptions): Promise<BatchRes
     }
   }
 
-  debug(`Batch delete complete: ${result.deleted} deleted, ${result.failed.length} failed`);
+  debug(`Batch delete complete: ${result.deleted.length} deleted, ${result.failed.length} failed`);
   return result;
 }
 
@@ -498,9 +467,9 @@ export async function batchDelete(options: BatchDeleteOptions): Promise<BatchRes
  * Result of a batch move operation.
  */
 export interface BatchMoveResult {
-  /** Number of notes successfully moved */
-  moved: number;
-  /** Notes that failed to move */
+  /** Notes that were moved; `folder` is the target folder */
+  moved: Array<NoteRef & { fromFolder: string }>;
+  /** Inputs (titles, or note names in folder mode) that could not be moved */
   failed: string[];
 }
 
@@ -510,9 +479,9 @@ export interface BatchMoveResult {
 export interface BatchMoveOptions {
   /** List of note titles (supports folder/title and id:xxx formats) */
   titles?: string[];
-  /** Move all notes from this folder */
+  /** Move all notes from this folder (name, nested path or "Account/Folder") */
   sourceFolder?: string;
-  /** Target folder (required) */
+  /** Target folder (required; name, nested path or "Account/Folder") */
   targetFolder: string;
 }
 
@@ -520,11 +489,11 @@ export interface BatchMoveOptions {
  * Move multiple notes to a target folder.
  *
  * @param options - Either titles array OR sourceFolder (not both) + targetFolder
- * @returns BatchMoveResult with moved count and failed notes
- * @throws Error if READONLY_MODE is enabled
- * @throws Error if both titles and sourceFolder provided
- * @throws Error if neither titles nor sourceFolder provided
+ * @returns Moved notes plus per-note failures
+ * @throws ReadOnlyModeError if READONLY_MODE is enabled
+ * @throws Error if both or neither of titles/sourceFolder are provided
  * @throws Error if targetFolder is empty
+ * @throws Error if a folder is missing or its name matches several folders
  */
 export async function batchMove(options: BatchMoveOptions): Promise<BatchMoveResult> {
   checkReadOnly();
@@ -543,57 +512,51 @@ export async function batchMove(options: BatchMoveOptions): Promise<BatchMoveRes
     throw new Error("Specify either titles or sourceFolder");
   }
 
-  const result: BatchMoveResult = { moved: 0, failed: [] };
+  const result: BatchMoveResult = { moved: [], failed: [] };
 
   if (sourceFolder) {
-    // Move all notes from source folder via single JXA call
     debug(`Batch moving all notes from "${sourceFolder}" to "${targetFolder}"`);
 
-    const escapedSource = JSON.stringify(sourceFolder);
-    const escapedTarget = JSON.stringify(targetFolder);
-    const jxaResult = await runJxa(`
+    const jxaResult = await executeJxa<string>(`
       const app = Application('Notes');
-      const sourceName = ${escapedSource};
-      const targetName = ${escapedTarget};
+      ${FOLDER_JXA_HELPERS}
 
-      const sourceFolders = app.folders.whose({name: sourceName})();
-      if (sourceFolders.length === 0) {
-        throw new Error("Source folder not found: " + sourceName);
-      }
+      const source = findFolder(${JSON.stringify(sourceFolder)}, 'Source folder');
+      const target = findFolder(${JSON.stringify(targetFolder)}, 'Target folder');
+      const sourceName = source.name();
+      const targetName = target.name();
+      const ids = source.notes.id();
+      const names = source.notes.name();
+      const moved = [];
+      const failed = [];
 
-      const targetFolders = app.folders.whose({name: targetName})();
-      if (targetFolders.length === 0) {
-        throw new Error("Target folder not found: " + targetName);
-      }
-
-      const source = sourceFolders[0];
-      const target = targetFolders[0];
-      const notes = source.notes();
-      let movedCount = 0;
-
-      // Move in reverse order to avoid index shifting
-      for (let i = notes.length - 1; i >= 0; i--) {
+      for (let i = 0; i < ids.length; i++) {
         try {
-          notes[i].move({to: target});
-          movedCount++;
+          app.notes.byId(ids[i]).move({to: target});
+          moved.push({ id: ids[i], title: names[i] || '', folder: targetName, fromFolder: sourceName });
         } catch (e) {
-          // Continue on individual failures
+          failed.push(names[i] || ids[i]);
         }
       }
 
-      return JSON.stringify({ movedCount });
+      return JSON.stringify({ moved: moved, failed: failed });
     `);
 
-    const { movedCount } = JSON.parse(jxaResult as string);
-    result.moved = movedCount;
+    const parsed = JSON.parse(jxaResult) as BatchMoveResult;
+    result.moved = parsed.moved;
+    result.failed = parsed.failed;
   } else if (titles) {
-    // Move individual notes
     debug(`Batch moving ${titles.length} notes to "${targetFolder}"`);
 
     for (const title of titles) {
       try {
-        await moveNote(title, targetFolder);
-        result.moved++;
+        const moved = await moveNote(title, targetFolder);
+        result.moved.push({
+          id: moved.id,
+          title: moved.title,
+          folder: moved.toFolder,
+          fromFolder: moved.fromFolder,
+        });
       } catch (error) {
         result.failed.push(title);
         debug(`Failed to move "${title}":`, error);
@@ -601,6 +564,6 @@ export async function batchMove(options: BatchMoveOptions): Promise<BatchMoveRes
     }
   }
 
-  debug(`Batch move complete: ${result.moved} moved, ${result.failed.length} failed`);
+  debug(`Batch move complete: ${result.moved.length} moved, ${result.failed.length} failed`);
   return result;
 }

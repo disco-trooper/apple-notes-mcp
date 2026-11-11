@@ -1,146 +1,76 @@
 /**
- * Note indexing pipeline for semantic search.
+ * Index synchronisation for both LanceDB tables.
  *
- * Supports:
- * - Full reindexing (drop all, reindex everything)
- * - Incremental indexing (only changed notes)
- * - Single note reindexing
+ * - `notes`: one row per note (metadata, tags, outlinks, note-level vector)
+ * - `chunks`: chunk rows used by search-notes
+ *
+ * indexNotes() is the single entry point that syncs both tables from one
+ * fetch of the library. Rows are keyed by the Apple Notes id; a note is
+ * rewritten when its `modified` differs from the stored `modified`.
+ * Every write runs under the in-process index lock.
  */
 
-import { getEmbedding, getEmbeddingBatch } from "../embeddings/index.js";
+import { getEmbeddingBatch, getProviderDescription } from "../embeddings/index.js";
 import {
   getVectorStore,
+  getChunkStore,
+  assertIndexCompatible,
+  recordIndexModel,
   type NoteRecord,
+  type ChunkRecord,
   type IndexMetadataRecord,
 } from "../db/lancedb.js";
 import {
   getAllNotesWithFallback,
+  getNoteById,
   getNoteByTitle,
+  type NoteDetails,
 } from "../notes/read.js";
 import { createDebugLogger } from "../utils/debug.js";
 import { truncateForEmbedding } from "../utils/text.js";
 import { NoteNotFoundError } from "../errors/index.js";
-import { extractMetadata } from "../graph/extract.js";
 import { getEmbeddingBatchSize } from "../config/constants.js";
 import {
   type IndexRunOptions,
   type IndexProgressEvent,
   throwIfCancelled,
 } from "../indexing/contracts.js";
+import { withIndexLock } from "../indexing/lock.js";
+import { chunkNote, prepareNote, type PreparedNote, type UnembeddedChunk } from "./chunk-indexer.js";
 
-/**
- * Extract note title from folder/title key.
- * Handles nested folders correctly by taking the last segment.
- */
-export function extractTitleFromKey(key: string): string {
-  return key.split("/").at(-1) ?? key;
-}
-
-// Debug logging
 const debug = createDebugLogger("INDEX");
 
 /**
  * Result of an indexing operation.
  */
 export interface IndexResult {
-  /** Total notes processed */
+  /** Total notes seen (fetched + skipped during fetch) */
   total: number;
-  /** Notes successfully indexed */
+  /** Notes written to the notes table */
   indexed: number;
-  /** Notes that failed to index */
-  errors: number;
   /** Time taken in milliseconds */
   timeMs: number;
-  /** Breakdown for incremental indexing */
+  /** Breakdown for incremental indexing (notes table) */
   breakdown?: {
     added: number;
     updated: number;
     deleted: number;
     skipped: number;
   };
-  /** List of notes that failed to index (for debugging) */
-  failedNotes?: string[];
   /** Notes skipped during fetch (locked, syncing, corrupted) */
   skippedNotes?: string[];
+  /** Chunk rows written to the chunks table */
+  chunks?: number;
 }
 
-/**
- * Note data prepared for embedding.
- */
-interface PreparedNote {
-  id: string;
-  title: string;
-  content: string;
-  truncatedContent: string;
-  folder: string;
-  created: string;
-  modified: string;
-  tags: string[];
-  outlinks: string[];
-}
-
-/**
- * Prepare a note for embedding by extracting metadata and truncating content.
- * Returns null if the note content is empty.
- */
-function prepareNoteForEmbedding(note: {
-  id: string;
-  title: string;
-  content: string;
-  folder: string;
-  created: string;
-  modified: string;
-}): PreparedNote | null {
-  if (!note.content.trim()) {
-    return null;
-  }
-
-  const metadata = extractMetadata(note.content);
-
-  return {
-    id: note.id,
-    title: note.title,
-    content: note.content,
-    truncatedContent: truncateForEmbedding(note.content),
-    folder: note.folder,
-    created: note.created,
-    modified: note.modified,
-    tags: metadata.tags,
-    outlinks: metadata.outlinks,
-  };
-}
-
-/**
- * Build a NoteRecord from a PreparedNote and its embedding vector.
- */
-function buildNoteRecord(
-  note: PreparedNote,
-  vector: number[],
-  indexedAt: string
-): NoteRecord {
-  return {
-    id: note.id,
-    title: note.title,
-    content: note.content,
-    vector,
-    folder: note.folder,
-    created: note.created,
-    modified: note.modified,
-    indexed_at: indexedAt,
-    tags: note.tags,
-    outlinks: note.outlinks,
-  };
-}
-
-/**
- * Split array into chunks of specified size.
- */
-function chunks<T>(array: T[], size: number): T[][] {
-  const result: T[][] = [];
-  for (let i = 0; i < array.length; i += size) {
-    result.push(array.slice(i, i + size));
-  }
-  return result;
+/** Changes to apply to one table. */
+interface TablePlan {
+  /** Recreate the table from scratch (full mode, or table missing/empty). */
+  rebuild: boolean;
+  /** Notes whose rows must be (re)written. */
+  write: NoteDetails[];
+  /** Note ids whose rows must be removed. */
+  remove: string[];
 }
 
 function emitProgress(
@@ -150,391 +80,368 @@ function emitProgress(
   total: number,
   message: string
 ): void {
-  options.onProgress?.({
-    stage,
-    current,
-    total,
-    message,
-  });
+  options.onProgress?.({ stage, current, total, message });
 }
 
 /**
- * Perform full reindexing of all notes.
- * Drops existing index and rebuilds from scratch.
- *
- * Uses:
- * - Hybrid fallback for JXA fetch (single call → folder → note-by-note)
- * - Streaming batch embedding (process & store in chunks to reduce memory)
+ * Diff stored rows (id -> modified) against the current notes.
+ * `existing === null` means the table is missing.
+ * `keep` holds ids that must not be deleted (notes that failed to fetch).
  */
-export async function fullIndex(options: IndexRunOptions = {}): Promise<IndexResult> {
-  const startTime = Date.now();
-  debug("Starting full index...");
+function planTable(
+  existing: Map<string, string> | null,
+  notes: NoteDetails[],
+  keep: Set<string>
+): TablePlan {
+  if (existing === null || existing.size === 0) {
+    return { rebuild: true, write: notes, remove: [] };
+  }
 
-  throwIfCancelled(options.signal);
-  emitProgress(options, "fetch", 0, 1, "Fetching notes");
+  const current = new Set<string>();
+  const write: NoteDetails[] = [];
+  for (const note of notes) {
+    current.add(note.id);
+    if (existing.get(note.id) !== note.modified) {
+      write.push(note);
+    }
+  }
 
-  // Phase 1: Fetch all notes with hybrid fallback
-  debug("Phase 1: Fetching all notes (with fallback)...");
-  const { notes: allNotes, skipped: skippedNotes } = await getAllNotesWithFallback({ signal: options.signal, onBatch: (fetched) => emitProgress(options, 'fetch', fetched, Math.max(fetched, 1), `Fetched ${fetched} notes...`) });
-  debug(`Fetched ${allNotes.length} notes, ${skippedNotes.length} skipped`);
-  emitProgress(options, "fetch", 1, 1, `Fetched ${allNotes.length} notes`);
-  throwIfCancelled(options.signal);
+  const remove = [...existing.keys()].filter((id) => !current.has(id) && !keep.has(id));
+  return { rebuild: false, write, remove };
+}
 
-  // Filter empty notes and prepare for embedding
-  const preparedNotes = allNotes
-    .map((note) => prepareNoteForEmbedding(note))
-    .filter((note): note is PreparedNote => note !== null);
+function toNoteRecord(prepared: PreparedNote, vector: number[], indexedAt: string): NoteRecord {
+  const { note } = prepared;
+  return {
+    id: note.id,
+    title: note.title,
+    content: prepared.text,
+    vector,
+    folder: note.folder,
+    created: note.created,
+    modified: note.modified,
+    indexed_at: indexedAt,
+    tags: prepared.tags,
+    outlinks: prepared.outlinks,
+  };
+}
 
-  debug(`Prepared ${preparedNotes.length} notes for embedding`);
-  emitProgress(options, "prepare", preparedNotes.length, allNotes.length, "Prepared notes for embedding");
-  throwIfCancelled(options.signal);
-
-  const store = getVectorStore();
-
-  // Phase 2: Stream process in batches
+/** Embed texts in provider-sized batches. */
+async function embedAll(texts: string[], options: IndexRunOptions = {}): Promise<number[][]> {
   const batchSize = getEmbeddingBatchSize();
-  debug(`Phase 2: Processing ${preparedNotes.length} notes in batches of ${batchSize}...`);
+  const batchCount = Math.ceil(texts.length / batchSize);
+  const vectors: number[][] = [];
 
-  const batches = chunks(preparedNotes, batchSize);
-  const indexedAt = new Date().toISOString();
-  let totalIndexed = 0;
-  let isFirstBatch = true;
-
-  for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
+  for (let batch = 0; batch < batchCount; batch++) {
     throwIfCancelled(options.signal);
-
-    const batch = batches[batchIdx];
-    debug(`Batch ${batchIdx + 1}/${batches.length}: ${batch.length} notes`);
-    emitProgress(
-      options,
-      "embed",
-      batchIdx,
-      batches.length,
-      `Embedding batch ${batchIdx + 1}/${batches.length}`
-    );
-
-    // Generate embeddings for this batch
-    const textsToEmbed = batch.map((n) => n.truncatedContent);
-    let vectors: number[][];
-    try {
-      vectors = await getEmbeddingBatch(textsToEmbed);
-    } catch (error) {
-      debug(`Batch ${batchIdx + 1} embedding failed:`, error);
-      throw error;
-    }
-    throwIfCancelled(options.signal);
-    emitProgress(
-      options,
-      "embed",
-      batchIdx + 1,
-      batches.length,
-      `Embedded batch ${batchIdx + 1}/${batches.length}`
-    );
-
-    // Build records
-    const records = batch.map((note, i) =>
-      buildNoteRecord(note, vectors[i], indexedAt)
-    );
-
-    // Store immediately (first batch creates table, subsequent append)
-    if (isFirstBatch) {
-      await store.index(records);
-      isFirstBatch = false;
-    } else {
-      await store.addRecords(records);
-    }
-    throwIfCancelled(options.signal);
-
-    totalIndexed += records.length;
-    debug(`Batch ${batchIdx + 1} stored, total: ${totalIndexed}`);
-    emitProgress(
-      options,
-      "persist",
-      batchIdx + 1,
-      batches.length,
-      `Stored batch ${batchIdx + 1}/${batches.length}`
-    );
+    emitProgress(options, "embed", batch, batchCount, `Embedding batch ${batch + 1}/${batchCount}`);
+    const start = batch * batchSize;
+    vectors.push(...(await getEmbeddingBatch(texts.slice(start, start + batchSize))));
   }
+  emitProgress(options, "embed", batchCount, batchCount, `Embedded ${texts.length} texts`);
 
-  // Phase 3: Rebuild FTS index (once at end)
-  debug("Phase 3: Rebuilding FTS index...");
-  if (totalIndexed > 0) {
-    emitProgress(options, "rebuild-fts", 0, 1, "Rebuilding FTS index");
-    await store.rebuildFtsIndex();
-    emitProgress(options, "rebuild-fts", 1, 1, "FTS index rebuilt");
-  }
-
-  const timeMs = Date.now() - startTime;
-  const emptySkipped = allNotes.length - preparedNotes.length;
-  debug(`Full index complete: ${totalIndexed} indexed, ${emptySkipped} empty, ${skippedNotes.length} fetch-skipped, ${timeMs}ms`);
-  emitProgress(options, "done", 1, 1, "Full index completed");
-
-  return {
-    total: allNotes.length + skippedNotes.length,
-    indexed: totalIndexed,
-    errors: 0,
-    timeMs,
-    skippedNotes: skippedNotes.length > 0 ? skippedNotes : undefined,
-  };
+  return vectors;
 }
 
 /**
- * Perform incremental indexing.
- * Only processes notes that have changed since last index.
- * Uses batch fetch (getAllNotesWithFallback) instead of individual JXA calls.
+ * Ids of indexed notes that could not be fetched this run (locked, syncing).
+ * Their rows are kept instead of being treated as deleted.
  */
-export async function incrementalIndex(options: IndexRunOptions = {}): Promise<IndexResult> {
+function idsOfSkippedNotes(metadata: IndexMetadataRecord[] | null, skipped: string[]): Set<string> {
+  if (!metadata || skipped.length === 0) {
+    return new Set();
+  }
+  const skippedKeys = new Set(skipped);
+  return new Set(
+    metadata.filter((r) => skippedKeys.has(`${r.folder}/${r.title}`)).map((r) => r.id)
+  );
+}
+
+async function runIndex(
+  mode: "full" | "incremental",
+  options: IndexRunOptions
+): Promise<IndexResult> {
   const startTime = Date.now();
-  debug("Starting incremental index...");
-
-  throwIfCancelled(options.signal);
-  emitProgress(options, "fetch", 0, 1, "Fetching notes for incremental index");
-
-  const store = getVectorStore();
-
-  // Get existing indexed notes first
-  let existingRecords: IndexMetadataRecord[];
-  try {
-    existingRecords = await store.getIndexMetadata();
-  } catch (error) {
-    // No existing index, fall back to full index
-    debug("No existing index found, performing full index. Error:", error);
-    return fullIndex(options);
-  }
-
-  // Phase 1: Fetch ALL notes with content in batch (hybrid fallback)
-  debug("Phase 1: Fetching all notes with fallback...");
-  const { notes: allNotesWithContent, skipped: skippedNotes } = await getAllNotesWithFallback({ signal: options.signal, onBatch: (fetched) => emitProgress(options, 'fetch', fetched, Math.max(fetched, 1), `Fetched ${fetched} notes...`) });
-  debug(`Fetched ${allNotesWithContent.length} notes, skipped ${skippedNotes.length}`);
-  emitProgress(options, "fetch", 1, 1, `Fetched ${allNotesWithContent.length} notes`);
+  debug(`Starting ${mode} index...`);
   throwIfCancelled(options.signal);
 
-  // Build lookup maps
-  const existingByKey = new Map<string, IndexMetadataRecord>();
-  for (const record of existingRecords) {
-    const key = `${record.folder}/${record.title}`;
-    existingByKey.set(key, record);
+  const noteStore = getVectorStore();
+  const chunkStore = getChunkStore();
+
+  // Stored state per table; null = table missing (rebuilt from scratch).
+  let noteMetadata: IndexMetadataRecord[] | null = null;
+  let chunkMetadata: Map<string, string> | null = null;
+  if (mode === "incremental") {
+    noteMetadata = await noteStore.getIndexMetadata().catch((error: unknown) => {
+      debug("Notes table unavailable, rebuilding it:", error);
+      return null;
+    });
+    chunkMetadata = await chunkStore
+      .getNoteMetadata()
+      .then((rows) => new Map(rows.map((r): [string, string] => [r.note_id, r.modified])))
+      .catch((error: unknown) => {
+        debug("Chunks table unavailable, rebuilding it:", error);
+        return null;
+      });
   }
+  const noteModified = noteMetadata
+    ? new Map(noteMetadata.map((r): [string, string] => [r.id, r.modified]))
+    : null;
 
-  const currentByKey = new Map<string, typeof allNotesWithContent[0]>();
-  for (const note of allNotesWithContent) {
-    const key = `${note.folder}/${note.title}`;
-    currentByKey.set(key, note);
-  }
+  // Phase 1: fetch the library once for both tables.
+  emitProgress(options, "fetch", 0, 1, "Fetching notes");
+  const { notes, skipped } = await getAllNotesWithFallback({
+    signal: options.signal,
+    onBatch: (fetched) =>
+      emitProgress(options, "fetch", fetched, Math.max(fetched, 1), `Fetched ${fetched} notes...`),
+  });
+  debug(`Fetched ${notes.length} notes, ${skipped.length} skipped`);
+  emitProgress(options, "fetch", 1, 1, `Fetched ${notes.length} notes`);
+  throwIfCancelled(options.signal);
 
-  // Determine what needs to be done
-  const toAdd: typeof allNotesWithContent = [];
-  const toUpdate: typeof allNotesWithContent = [];
-  const toDelete: string[] = [];
-  const toSkip: string[] = [];
+  // Phase 2: diff each table and prepare content (once per note).
+  const keep = idsOfSkippedNotes(noteMetadata, skipped);
+  const notesPlan = planTable(noteModified, notes, keep);
+  const chunksPlan = planTable(chunkMetadata, notes, keep);
 
-  // Check current notes
-  for (const note of allNotesWithContent) {
-    const key = `${note.folder}/${note.title}`;
-    const existing = existingByKey.get(key);
+  const preparedById = new Map<string, PreparedNote | null>();
+  const prepare = (note: NoteDetails): PreparedNote | null => {
+    if (!preparedById.has(note.id)) {
+      preparedById.set(note.id, prepareNote(note));
+    }
+    return preparedById.get(note.id) ?? null;
+  };
 
-    if (!existing) {
-      toAdd.push(note);
-    } else {
-      // Compare modified date with indexed_at timestamp
-      const currentModified = new Date(note.modified).getTime();
-      const indexedAt = new Date(existing.indexed_at).getTime();
-
-      if (currentModified > indexedAt) {
-        toUpdate.push(note);
-      } else {
-        toSkip.push(key);
-      }
+  const notesToEmbed: PreparedNote[] = [];
+  for (const note of notesPlan.write) {
+    const prepared = prepare(note);
+    if (prepared) {
+      notesToEmbed.push(prepared);
+    } else if (noteModified?.has(note.id)) {
+      // Content became empty/unindexable: drop the old row.
+      notesPlan.remove.push(note.id);
     }
   }
 
-  // Check for deleted notes
-  for (const [key] of existingByKey) {
-    if (!currentByKey.has(key)) {
-      toDelete.push(key);
+  const chunksToEmbed: UnembeddedChunk[] = [];
+  for (const note of chunksPlan.write) {
+    const prepared = prepare(note);
+    if (prepared) {
+      chunksToEmbed.push(...chunkNote(prepared));
     }
   }
+  // Rewritten notes lose their old chunks even when they now produce none.
+  const chunkRemove = chunksPlan.rebuild
+    ? []
+    : [
+        ...chunksPlan.remove,
+        ...chunksPlan.write.map((n) => n.id).filter((id) => chunkMetadata?.has(id)),
+      ];
 
-  debug(`Incremental: add=${toAdd.length}, update=${toUpdate.length}, delete=${toDelete.length}, skip=${toSkip.length}`);
+  debug(
+    `Plan: notes ${notesPlan.rebuild ? "rebuild" : "update"} write=${notesToEmbed.length} remove=${notesPlan.remove.length}; ` +
+      `chunks ${chunksPlan.rebuild ? "rebuild" : "update"} write=${chunksToEmbed.length} remove=${chunkRemove.length}`
+  );
+  emitProgress(
+    options,
+    "prepare",
+    notesToEmbed.length + chunksToEmbed.length,
+    notes.length,
+    "Prepared notes and chunks"
+  );
 
-  let errors = 0;
-  const failedNotes: string[] = [...skippedNotes]; // Include skipped notes from fallback
+  // Phase 3: embed everything before touching either table.
+  const vectors = await embedAll(
+    [
+      ...notesToEmbed.map((p) => truncateForEmbedding(p.text)),
+      ...chunksToEmbed.map((c) => c.content),
+    ],
+    options
+  );
+  throwIfCancelled(options.signal);
 
-  // Process additions and updates - notes already have content!
-  const toProcess = [...toAdd, ...toUpdate];
-  emitProgress(options, "prepare", toProcess.length, allNotesWithContent.length, "Prepared notes to process");
-
-  if (toProcess.length > 0) {
-    // Phase 2: Prepare notes for embedding (content already fetched)
-    debug(`Phase 2: Preparing ${toProcess.length} notes...`);
-    const preparedNotes: PreparedNote[] = [];
-
-    for (const noteDetails of toProcess) {
-      throwIfCancelled(options.signal);
-      const prepared = prepareNoteForEmbedding(noteDetails);
-      if (prepared) {
-        preparedNotes.push(prepared);
-      }
-    }
-
-    if (preparedNotes.length > 0) {
-      // Phase 3: Generate embeddings in batch
-      debug(`Phase 3: Generating ${preparedNotes.length} embeddings in batch...`);
-      const preparedBatches = chunks(preparedNotes, getEmbeddingBatchSize());
-      let persistedCount = 0;
-
-      for (let batchIdx = 0; batchIdx < preparedBatches.length; batchIdx++) {
-        throwIfCancelled(options.signal);
-
-        const batch = preparedBatches[batchIdx];
-        emitProgress(
-          options,
-          "embed",
-          batchIdx,
-          preparedBatches.length,
-          `Embedding batch ${batchIdx + 1}/${preparedBatches.length}`
-        );
-
-        const textsToEmbed = batch.map((n) => n.truncatedContent);
-
-        let vectors: number[][];
-        try {
-          vectors = await getEmbeddingBatch(textsToEmbed);
-        } catch (error) {
-          debug("Batch embedding failed:", error);
-          throw error;
-        }
-
-        emitProgress(
-          options,
-          "embed",
-          batchIdx + 1,
-          preparedBatches.length,
-          `Embedded batch ${batchIdx + 1}/${preparedBatches.length}`
-        );
-
-        // Phase 4: Update database
-        debug("Phase 4: Updating database...");
-        const indexedAt = new Date().toISOString();
-
-        for (let i = 0; i < batch.length; i++) {
-          throwIfCancelled(options.signal);
-
-          const note = batch[i];
-          const record = buildNoteRecord(note, vectors[i], indexedAt);
-
-          try {
-            await store.update(record);
-          } catch (error) {
-            debug(`Error updating ${note.title}:`, error);
-            failedNotes.push(`${note.folder}/${note.title}`);
-            errors++;
-          }
-
-          persistedCount += 1;
-          emitProgress(
-            options,
-            "persist",
-            persistedCount,
-            preparedNotes.length,
-            `Persisted ${persistedCount}/${preparedNotes.length} note updates`
-          );
-        }
-      }
-    }
+  const description = getProviderDescription();
+  const dims = vectors[0]?.length;
+  if (mode === "incremental" && dims !== undefined) {
+    await assertIndexCompatible(description, dims);
   }
 
-  // Process deletions
-  for (let deleteIdx = 0; deleteIdx < toDelete.length; deleteIdx++) {
-    const key = toDelete[deleteIdx];
-    throwIfCancelled(options.signal);
-    try {
-      // Parse folder and title from key (e.g., "Work/Projects/My Note")
-      const lastSlash = key.lastIndexOf("/");
-      const folder = key.substring(0, lastSlash);
-      const title = key.substring(lastSlash + 1);
-      await store.deleteByFolderAndTitle(folder, title);
-    } catch (error) {
-      debug(`Error deleting ${key}:`, error);
-      failedNotes.push(`DELETE: ${key}`);
-      errors++;
-    }
+  // Phase 4: write. Not cancellable once started, so both tables stay consistent.
+  const indexedAt = new Date().toISOString();
+  const noteRecords = notesToEmbed.map((p, i) => toNoteRecord(p, vectors[i], indexedAt));
+  const chunkRecords: ChunkRecord[] = chunksToEmbed.map((c, i) => ({
+    ...c,
+    vector: vectors[notesToEmbed.length + i],
+    indexed_at: indexedAt,
+  }));
 
-    emitProgress(
-      options,
-      "delete",
-      deleteIdx + 1,
-      Math.max(toDelete.length, 1),
-      `Deleted ${deleteIdx + 1}/${toDelete.length} stale records`
-    );
+  emitProgress(options, "persist", 0, 2, "Writing notes table");
+  if (notesPlan.rebuild) {
+    if (noteRecords.length > 0) {
+      await noteStore.index(noteRecords);
+    } else if (mode === "full") {
+      await noteStore.clear();
+    }
+  } else {
+    await noteStore.upsert(noteRecords);
+    await noteStore.deleteByIds(notesPlan.remove);
   }
 
-  // Rebuild FTS index if any changes were made
-  if (toAdd.length > 0 || toUpdate.length > 0 || toDelete.length > 0) {
-    debug("Rebuilding FTS index after incremental changes");
+  emitProgress(options, "persist", 1, 2, "Writing chunks table");
+  if (chunksPlan.rebuild) {
+    if (chunkRecords.length > 0) {
+      await chunkStore.indexChunks(chunkRecords);
+    } else if (mode === "full") {
+      await chunkStore.clear();
+    }
+  } else {
+    await chunkStore.deleteChunksByNoteIds(chunkRemove);
+    await chunkStore.addChunks(chunkRecords);
+  }
+  emitProgress(options, "persist", 2, 2, "Tables written");
+
+  // Overwrites build their own FTS index; incremental writes rebuild it once per table.
+  const notesChanged = !notesPlan.rebuild && (noteRecords.length > 0 || notesPlan.remove.length > 0);
+  const chunksChanged = !chunksPlan.rebuild && (chunkRecords.length > 0 || chunkRemove.length > 0);
+  if (notesChanged || chunksChanged) {
     emitProgress(options, "rebuild-fts", 0, 1, "Rebuilding FTS index");
-    await store.rebuildFtsIndex();
+    if (notesChanged) await noteStore.rebuildFtsIndex();
+    if (chunksChanged) await chunkStore.rebuildFtsIndex();
     emitProgress(options, "rebuild-fts", 1, 1, "FTS index rebuilt");
   }
 
-  const timeMs = Date.now() - startTime;
-  debug(`Incremental index complete: ${timeMs}ms`);
-  emitProgress(options, "done", 1, 1, "Incremental index completed");
+  if (dims !== undefined) {
+    await recordIndexModel(description, dims);
+  }
 
+  const timeMs = Date.now() - startTime;
+  debug(`${mode} index complete: ${noteRecords.length} notes, ${chunkRecords.length} chunks, ${timeMs}ms`);
+  emitProgress(options, "done", 1, 1, `${mode === "full" ? "Full" : "Incremental"} index completed`);
+
+  const added = noteRecords.filter((r) => !noteModified?.has(r.id)).length;
   return {
-    total: allNotesWithContent.length,
-    indexed: toAdd.length + toUpdate.length,
-    errors,
+    total: notes.length + skipped.length,
+    indexed: noteRecords.length,
     timeMs,
-    breakdown: {
-      added: toAdd.length,
-      updated: toUpdate.length,
-      deleted: toDelete.length,
-      skipped: toSkip.length,
-    },
-    failedNotes: failedNotes.length > 0 ? failedNotes : undefined,
-    skippedNotes: skippedNotes.length > 0 ? skippedNotes : undefined,
+    breakdown:
+      mode === "incremental"
+        ? {
+            added,
+            updated: noteRecords.length - added,
+            deleted: notesPlan.remove.length,
+            skipped: notes.length - noteRecords.length,
+          }
+        : undefined,
+    skippedNotes: skipped.length > 0 ? skipped : undefined,
+    chunks: chunkRecords.length,
   };
 }
 
 /**
- * Reindex a single note by title.
+ * Sync both index tables with Apple Notes.
+ *
+ * - full: rebuild both tables from scratch (recovery path; no model check)
+ * - incremental: rewrite added/changed notes and remove deleted ones, per table
+ */
+export function indexNotes(
+  mode: "full" | "incremental" = "incremental",
+  options: IndexRunOptions = {}
+): Promise<IndexResult> {
+  return withIndexLock(() => runIndex(mode, options));
+}
+
+/**
+ * Rewrite the rows of `notes` and remove `removeIds` in every existing table.
+ * Caller holds the index lock. Returns false when no index exists yet.
+ */
+async function writeNotes(notes: NoteDetails[], removeIds: string[]): Promise<boolean> {
+  const noteStore = getVectorStore();
+  const chunkStore = getChunkStore();
+  const [noteCount, chunkCount] = await Promise.all([noteStore.count(), chunkStore.count()]);
+  const hasNotes = noteCount > 0;
+  const hasChunks = chunkCount > 0;
+  if (!hasNotes && !hasChunks) {
+    debug("No index yet; skipping write sync");
+    return false;
+  }
+
+  const indexable: PreparedNote[] = [];
+  const unindexableIds: string[] = [];
+  for (const note of notes) {
+    const prepared = prepareNote(note);
+    if (prepared) {
+      indexable.push(prepared);
+    } else {
+      unindexableIds.push(note.id);
+    }
+  }
+
+  const noteTexts = hasNotes ? indexable.map((p) => truncateForEmbedding(p.text)) : [];
+  const chunks = hasChunks ? indexable.flatMap((p) => chunkNote(p)) : [];
+  const vectors = await embedAll([...noteTexts, ...chunks.map((c) => c.content)]);
+  if (vectors.length > 0) {
+    await assertIndexCompatible(getProviderDescription(), vectors[0].length);
+  }
+
+  const indexedAt = new Date().toISOString();
+  if (hasNotes) {
+    await noteStore.upsert(noteTexts.map((_, i) => toNoteRecord(indexable[i], vectors[i], indexedAt)));
+    await noteStore.deleteByIds([...unindexableIds, ...removeIds]);
+    await noteStore.rebuildFtsIndex();
+  }
+  if (hasChunks) {
+    await chunkStore.deleteChunksByNoteIds([...notes.map((n) => n.id), ...removeIds]);
+    await chunkStore.addChunks(
+      chunks.map((c, i): ChunkRecord => ({ ...c, vector: vectors[noteTexts.length + i], indexed_at: indexedAt }))
+    );
+    await chunkStore.rebuildFtsIndex();
+  }
+  return true;
+}
+
+/**
+ * Re-fetch notes by id and rewrite them in both tables.
+ * Ids that no longer exist in Apple Notes are removed from the index.
+ *
+ * @returns ids that were not found
+ */
+export async function syncNotesById(ids: string[]): Promise<string[]> {
+  if (ids.length === 0) return [];
+  const notes: NoteDetails[] = [];
+  const missing: string[] = [];
+  for (const id of ids) {
+    const note = await getNoteById(id);
+    if (note) {
+      notes.push(note);
+    } else {
+      missing.push(id);
+    }
+  }
+  await withIndexLock(() => writeNotes(notes, missing));
+  return missing;
+}
+
+/** Remove notes from both tables by id. */
+export async function removeNotesFromIndex(ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  await withIndexLock(() => writeNotes([], ids));
+}
+
+/**
+ * Reindex a single note by title (or `Folder/Title`, `id:xxx`).
+ * A note whose content became empty is removed from the index.
  */
 export async function reindexNote(title: string): Promise<void> {
   debug(`Reindexing single note: ${title}`);
 
-  const noteDetails = await getNoteByTitle(title);
-  if (!noteDetails) {
+  const note = await getNoteByTitle(title);
+  if (!note) {
     throw new NoteNotFoundError(title);
   }
 
-  const prepared = prepareNoteForEmbedding(noteDetails);
-  if (!prepared) {
-    throw new Error(`Note is empty: "${title}"`);
+  const updated = await withIndexLock(() => writeNotes([note], []));
+  if (!updated) {
+    throw new Error("Index not found. Run index-notes first.");
   }
-
-  const vector = await getEmbedding(prepared.truncatedContent);
-  const record = buildNoteRecord(prepared, vector, new Date().toISOString());
-
-  const store = getVectorStore();
-  await store.update(record);
-
-  // Rebuild FTS index after single note update
-  debug("Rebuilding FTS index after single note reindex");
-  await store.rebuildFtsIndex();
-
   debug(`Reindexed: ${title}`);
-}
-
-/**
- * Index notes based on mode.
- */
-export async function indexNotes(
-  mode: "full" | "incremental" = "incremental",
-  options: IndexRunOptions = {}
-): Promise<IndexResult> {
-  if (mode === "full") {
-    return fullIndex(options);
-  }
-  return incrementalIndex(options);
 }

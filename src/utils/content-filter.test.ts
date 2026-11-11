@@ -7,7 +7,6 @@ import {
   removeBase64Blocks,
   redactSecrets,
   filterContent,
-  shouldIndexContent,
 } from "./content-filter.js";
 
 describe("content-filter", () => {
@@ -139,6 +138,16 @@ describe("content-filter", () => {
       expect(secretsFound).toContain("githubToken");
     });
 
+    it("redacts the whole private key block, not just its header", () => {
+      // Assembled at runtime so no key-shaped literal sits in the source
+      const marker = (kind: string) => `-----${kind} RSA ${"PRIVATE"} KEY-----`;
+      const key = [marker("BEGIN"), "MIIEowIBAAKCAQEA", "x9y8z7", marker("END")].join("\n");
+      const { content: redacted, secretsFound } = redactSecrets(`before\n${key}\nafter`);
+
+      expect(secretsFound).toContain("privateKey");
+      expect(redacted).toBe("before\n[PRIVATEKEY_REDACTED]\nafter");
+    });
+
     it("preserves normal text", () => {
       const content = "This is normal text without secrets.";
       const { content: redacted, secretsFound } = redactSecrets(content);
@@ -150,13 +159,16 @@ describe("content-filter", () => {
 
   describe("filterContent", () => {
     it("returns 'index' for clean content", () => {
-      // Content must be at least 50 chars (minContentLength default)
-      const content = "This is clean, normal content for indexing. It contains enough text to pass the minimum length requirement.";
+      const content = "This is clean, normal content for indexing.";
       const result = filterContent(content);
 
       expect(result.action).toBe("index");
       expect(result.cleanedContent).toBe(content);
       expect(result.reasons).toHaveLength(0);
+    });
+
+    it("indexes short notes", () => {
+      expect(filterContent("Buy milk").action).toBe("index");
     });
 
     it("returns 'skip' for binary content", () => {
@@ -185,19 +197,15 @@ describe("content-filter", () => {
       expect(result.reasons.some(r => r.includes("Base64"))).toBe(true);
     });
 
-    it("returns 'skip' if content too short after filtering", () => {
-      // Short text + Base64 that will be removed, leaving less than 50 chars
-      const base64 = "ZXlKMGVYQWlPaUpLVjFRaUxDSmhiR2NpT2lKU1V6STFOaUo5eyJpc3M";
-      const content = `Hi ${base64}`;
-      const result = filterContent(content);
+    it("returns 'skip' when only redacted placeholders remain", () => {
+      const result = filterContent(`ghp_${"a1B2".repeat(9)}`);
 
       expect(result.action).toBe("skip");
-      // After removing Base64, only "Hi [ENCODED]" remains which is too short
+      expect(result.reasons).toContain("No meaningful content after filtering");
     });
 
     it("respects custom configuration", () => {
       const base64 = "ZXlKMGVYQWlPaUpLVjFRaUxDSmhiR2NpT2lKU1V6STFOaUo5eyJpc3M";
-      // Need enough remaining content after potential filtering
       const content = `This is some text before the token. Token: ${base64}. And this is some text after the token that should remain.`;
 
       // With removeBase64 disabled, the Base64 should stay
@@ -205,21 +213,6 @@ describe("content-filter", () => {
 
       expect(result.action).not.toBe("skip");
       expect(result.cleanedContent).toContain(base64);
-    });
-  });
-
-  describe("shouldIndexContent", () => {
-    it("returns true for normal content", () => {
-      expect(shouldIndexContent("Normal text content")).toBe(true);
-    });
-
-    it("returns false for binary content", () => {
-      expect(shouldIndexContent("Binary\x00content")).toBe(false);
-    });
-
-    it("returns false for mostly Base64", () => {
-      const base64 = "ZXlKMGVYQWlPaUpLVjFRaUxDSmhiR2NpT2lKU1V6STFOaUo5".repeat(10);
-      expect(shouldIndexContent(base64)).toBe(false);
     });
   });
 });

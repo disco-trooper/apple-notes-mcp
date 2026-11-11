@@ -19,12 +19,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // Mock the killable JXA runner before importing the read module (same pattern
-// as read.test.ts). read.ts no longer imports run-jxa.
+// as read.test.ts).
 vi.mock("./jxa-runner.js", () => ({
-  runJxaWithKill: vi.fn(),
+  executeJxa: vi.fn(),
 }));
 
-import { runJxaWithKill } from "./jxa-runner.js";
+import { executeJxa } from "./jxa-runner.js";
 import { fetchFolderBatched, getAllNotesWithFallback } from "./read.js";
 import {
   DEFAULT_JXA_TIMEOUT_MS,
@@ -54,7 +54,7 @@ function makeRawNotes(count: number): RawNote[] {
 }
 
 function jxaCallSources(): string[] {
-  return vi.mocked(runJxaWithKill).mock.calls.map((args) => String(args[0]));
+  return vi.mocked(executeJxa).mock.calls.map((args) => String(args[0]));
 }
 
 /**
@@ -72,19 +72,20 @@ function jxaCallSources(): string[] {
  *   slices `slice(startIdx, endIdx - 1)` (inclusive JXA semantics mapping
  *   the exclusive JS range), while the mock applies plain JS `slice(start,
  *   end)` — both yield the same elements;
- * - array-returning title lookup (`foundNotes`) resolves with matches;
- * - single-note retry by title (`whose(`) or by index (`targetIdx`)
+ * - single-note retry by id (`targetId`) or by index (`targetIdx`)
  *   resolves with that note object (or null when unknown). The by-index
  *   check runs before the count check because its bounds guard also reads
  *   `.notes.length`.
  * `failStart` makes the batch starting at that offset reject persistently,
  * including its metadata-recovery batch and per-note retries (tracked via
- * failedRanges), to simulate an unreadable range.
+ * failedRanges), to simulate an unreadable range. With `bodiesOnly`, only
+ * the body-carrying batch fails: the metadata-only recovery batch (no
+ * `notes.body()`) and per-note retries succeed.
  */
-function mockBulkFetch(allRaw: RawNote[], opts?: { failStart?: number }) {
+function mockBulkFetch(allRaw: RawNote[], opts?: { failStart?: number; bodiesOnly?: boolean }) {
   const failedRanges: Array<{ start: number; end: number }> = [];
-  vi.mocked(runJxaWithKill).mockReset();
-  vi.mocked(runJxaWithKill).mockImplementation(async (...args: Parameters<typeof runJxaWithKill>) => {
+  vi.mocked(executeJxa).mockReset();
+  vi.mocked(executeJxa).mockImplementation(async (...args: Parameters<typeof executeJxa>) => {
     const src = String(args[0]);
     if (src.includes("folders.name()")) {
       return JSON.stringify({ names: ["Work"], counts: [allRaw.length] });
@@ -95,22 +96,21 @@ function mockBulkFetch(allRaw: RawNote[], opts?: { failStart?: number }) {
       if (!Number.isInteger(start) || !Number.isInteger(end)) {
         throw new Error("mockBulkFetch: cannot parse batch bounds from JXA code");
       }
-      if (opts?.failStart !== undefined && start === opts.failStart) {
-        failedRanges.push({ start, end });
+      const failing = opts?.failStart !== undefined && start === opts.failStart;
+      if (failing && (!opts?.bodiesOnly || src.includes("notes.body()"))) {
+        if (!opts?.bodiesOnly) {
+          failedRanges.push({ start, end });
+        }
         throw new Error(`Simulated batch failure at offset ${start}`);
       }
       return JSON.stringify(allRaw.slice(start, end));
     }
-    const titleMatch = src.match(/const targetTitle = ("(?:[^"\\]|\\.)*");/);
-    if (titleMatch && src.includes("foundNotes")) {
-      const title = JSON.parse(titleMatch[1]) as string;
-      return JSON.stringify(allRaw.filter((n) => n.title === title));
-    }
-    if (src.includes("whose({ name:") || titleMatch) {
-      const title = titleMatch ? (JSON.parse(titleMatch[1]) as string) : undefined;
-      const index = allRaw.findIndex((n) => n.title === title);
+    const idMatch = src.match(/const targetId = ("(?:[^"\\]|\\.)*");/);
+    if (idMatch) {
+      const id = JSON.parse(idMatch[1]) as string;
+      const index = allRaw.findIndex((n) => n.id === id);
       if (index >= 0 && failedRanges.some(({ start, end }) => index >= start && index < end)) {
-        throw new Error(`Simulated retry failure for note "${title ?? ""}"`);
+        throw new Error(`Simulated retry failure for note "${id}"`);
       }
       return JSON.stringify(index >= 0 ? allRaw[index] : null);
     }
@@ -172,7 +172,7 @@ describe("bulk fetch JXA strategy", () => {
   it("fetches 5 notes with batchSize 2 via multiple JXA calls", async () => {
     mockBulkFetch(makeRawNotes(5));
     const result = await getAllNotesWithFallback({ batchSize: 2 });
-    expect(vi.mocked(runJxaWithKill).mock.calls.length).toBeGreaterThan(2);
+    expect(vi.mocked(executeJxa).mock.calls.length).toBeGreaterThan(2);
     expect(result.notes).toHaveLength(5);
     expect(result.notes.map((n) => n.title)).toEqual(
       expect.arrayContaining(["Note 0", "Note 1", "Note 2", "Note 3", "Note 4"]),
@@ -192,6 +192,17 @@ describe("bulk fetch JXA strategy", () => {
     expect(Array.isArray(result.skipped)).toBe(true);
   });
 
+  it("retries a failed batch by id, so duplicate titles stay distinct notes", async () => {
+    const allRaw = makeRawNotes(4).map((note) => ({ ...note, title: "Same title" }));
+    mockBulkFetch(allRaw, { failStart: 2, bodiesOnly: true });
+    const result = await getAllNotesWithFallback({ batchSize: 2 });
+    expect(result.notes.map((n) => n.id)).toEqual(["id-0", "id-1", "id-2", "id-3"]);
+    expect(result.skipped).toEqual([]);
+    const retries = jxaCallSources().filter((s) => s.includes("const targetId"));
+    expect(retries).toHaveLength(2);
+    expect(retries.every((s) => s.includes("app.notes.byId") && !s.includes("whose("))).toBe(true);
+  });
+
   it("plans batch ranges from enumerate counts without per-folder count calls", async () => {
     mockBulkFetch(makeRawNotes(5));
     const result = await getAllNotesWithFallback({ batchSize: 2 });
@@ -207,8 +218,8 @@ describe("bulk fetch JXA strategy", () => {
 
   it("falls back to per-folder count calls when enumerate counts are missing", async () => {
     const allRaw = makeRawNotes(5);
-    vi.mocked(runJxaWithKill).mockReset();
-    vi.mocked(runJxaWithKill).mockImplementation(async (...args: Parameters<typeof runJxaWithKill>) => {
+    vi.mocked(executeJxa).mockReset();
+    vi.mocked(executeJxa).mockImplementation(async (...args: Parameters<typeof executeJxa>) => {
       const src = String(args[0]);
       if (src.includes("folders.name()")) {
         // Corrupt enumerate: legacy shape without per-folder counts.
@@ -269,8 +280,8 @@ describe("mid-fetch folder-list shift", () => {
     shiftAfterCalls: number;
   }): void {
     let callsSeen = 0;
-    vi.mocked(runJxaWithKill).mockReset();
-    vi.mocked(runJxaWithKill).mockImplementation(async (...callArgs: Parameters<typeof runJxaWithKill>) => {
+    vi.mocked(executeJxa).mockReset();
+    vi.mocked(executeJxa).mockImplementation(async (...callArgs: Parameters<typeof executeJxa>) => {
       const src = String(callArgs[0]);
       const names = callsSeen >= args.shiftAfterCalls ? args.shiftedNames : args.initialNames;
       callsSeen++;
@@ -308,10 +319,10 @@ describe("mid-fetch folder-list shift", () => {
         }
         return JSON.stringify((guardedFolder() ?? []).slice(start, end));
       }
-      if (src.includes("targetTitle")) {
-        const title = JSON.parse(src.match(/const targetTitle = ("(?:[^"\\]|\\.)*");/)?.[1] ?? "null") as string | null;
-        const folderNotes = guardedFolder();
-        return JSON.stringify(folderNotes?.find((n) => n.title === title) ?? null);
+      if (src.includes("const targetId")) {
+        const id = JSON.parse(src.match(/const targetId = ("(?:[^"\\]|\\.)*");/)?.[1] ?? "null") as string | null;
+        const all = [...args.notesByFolder.values()].flat();
+        return JSON.stringify(all.find((n) => n.id === id) ?? null);
       }
       if (src.includes("targetIdx")) {
         const index = Number(src.match(/const targetIdx = (\d+);/)?.[1]);

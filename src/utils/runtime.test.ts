@@ -52,19 +52,4 @@ describe("runtime checks", () => {
       expect(mockExit).not.toHaveBeenCalled();
     });
   });
-
-  describe("isTTY", () => {
-    it("should return boolean", async () => {
-      const { isTTY } = await import("./runtime.js");
-      expect(typeof isTTY()).toBe("boolean");
-    });
-
-    it("should return false when stdin or stdout is not a TTY", async () => {
-      // In CI/test environments, typically not a TTY
-      const { isTTY } = await import("./runtime.js");
-      // The result depends on the environment, but it should be a boolean
-      const result = isTTY();
-      expect(result === true || result === false).toBe(true);
-    });
-  });
 });

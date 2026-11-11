@@ -43,20 +43,3 @@ export class DuplicateNoteError extends Error {
     this.suggestions = suggestions;
   }
 }
-
-export class FolderNotFoundError extends Error {
-  readonly folder: string;
-
-  constructor(folder: string) {
-    super(`Folder not found: "${folder}"`);
-    this.name = "FolderNotFoundError";
-    this.folder = folder;
-  }
-}
-
-export class TableOutOfBoundsError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "TableOutOfBoundsError";
-  }
-}

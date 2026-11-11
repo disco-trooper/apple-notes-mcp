@@ -1,137 +1,236 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
-// Mock run-jxa before importing crud module
-vi.mock("run-jxa", () => ({
-  runJxa: vi.fn(),
+vi.mock("./jxa-runner.js", () => ({
+  executeJxa: vi.fn(),
 }));
 
-// Mock marked
 vi.mock("marked", () => ({
   marked: {
     parse: vi.fn((text: string) => `<p>${text}</p>`),
   },
 }));
 
-// Mock read.js
-vi.mock("./read.js", () => ({
+// Keep the real JXA folder helpers (they end up in generated scripts);
+// only the title resolution round trip is faked.
+vi.mock("./resolve.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./resolve.js")>()),
   resolveNoteTitle: vi.fn(),
 }));
 
-// Mock debug utility
 vi.mock("../utils/debug.js", () => ({
   createDebugLogger: vi.fn(() => vi.fn()),
 }));
 
 vi.mock("./tables.js", () => ({
-  findTables: vi.fn(),
-  updateTableCell: vi.fn(),
+  applyTableEdits: vi.fn(),
 }));
 
-import { runJxa } from "run-jxa";
-import { checkReadOnly, createNote, updateNote, deleteNote, moveNote, editTable, batchDelete, batchMove } from "./crud.js";
-import { resolveNoteTitle } from "./read.js";
-import { findTables, updateTableCell } from "./tables.js";
+import { executeJxa } from "./jxa-runner.js";
+import {
+  checkReadOnly,
+  createNote,
+  updateNote,
+  deleteNote,
+  moveNote,
+  editTable,
+  batchDelete,
+  batchMove,
+} from "./crud.js";
+import { resolveNoteTitle } from "./resolve.js";
+import { applyTableEdits } from "./tables.js";
+
+const WORK_NOTE = { id: "123", title: "Test", folder: "Work" };
+
+function resolvesTo(note = WORK_NOTE): void {
+  vi.mocked(resolveNoteTitle).mockResolvedValueOnce({ success: true, note });
+}
+
+function scriptOf(call: number): string {
+  return String(vi.mocked(executeJxa).mock.calls[call][0]);
+}
+
+/** Value of `const <name> = <JSON literal>;` in a generated script. */
+function constLiteral(script: string, name: string): unknown {
+  const match = script.match(new RegExp(`const ${name} = ("(?:[^"\\\\]|\\\\.)*"|null);`));
+  if (!match) {
+    throw new Error(`const ${name} not found in script`);
+  }
+  return JSON.parse(match[1]);
+}
+
+const DUPLICATE_RESOLUTION = {
+  success: false,
+  error: "Multiple notes found",
+  suggestions: [
+    { id: "id-1", folder: "Work", title: "Note", created: "2026-01-09T10:00:00.000Z" },
+    { id: "id-2", folder: "Personal", title: "Note", created: "2026-01-09T11:00:00.000Z" },
+  ],
+};
+
+beforeEach(() => {
+  vi.mocked(executeJxa).mockReset();
+  vi.mocked(resolveNoteTitle).mockReset();
+  vi.mocked(applyTableEdits).mockReset();
+  delete process.env.READONLY_MODE;
+});
+
+afterEach(() => {
+  delete process.env.READONLY_MODE;
+});
 
 describe("checkReadOnly", () => {
-  const originalEnv = process.env.READONLY_MODE;
-
-  beforeEach(() => {
-    delete process.env.READONLY_MODE;
-  });
-
-  afterEach(() => {
-    if (originalEnv !== undefined) {
-      process.env.READONLY_MODE = originalEnv;
+  it.each([
+    [undefined, false],
+    ["false", false],
+    ["0", false],
+    ["true", true],
+    ["TRUE", true],
+    ["1", true],
+  ])("READONLY_MODE=%s blocks writes: %s", (value, blocked) => {
+    if (value !== undefined) {
+      process.env.READONLY_MODE = value;
+    }
+    if (blocked) {
+      expect(() => checkReadOnly()).toThrow("read-only mode");
     } else {
-      delete process.env.READONLY_MODE;
+      expect(() => checkReadOnly()).not.toThrow();
     }
   });
+});
 
-  it("should not throw when READONLY_MODE is not set", () => {
-    expect(() => checkReadOnly()).not.toThrow();
-  });
-
-  it("should throw when READONLY_MODE is true", () => {
+describe("READONLY_MODE", () => {
+  it.each([
+    ["createNote", () => createNote("Test", "Content")],
+    ["updateNote", () => updateNote("Test", "Content")],
+    ["deleteNote", () => deleteNote("Test")],
+    ["moveNote", () => moveNote("Test", "Archive")],
+    ["editTable", () => editTable("Test", 0, [])],
+    ["batchDelete", () => batchDelete({ titles: ["Test"] })],
+    ["batchMove", () => batchMove({ sourceFolder: "Temp", targetFolder: "Archive" })],
+  ])("%s refuses to run without touching Notes", async (_name, run) => {
     process.env.READONLY_MODE = "true";
-    expect(() => checkReadOnly()).toThrow("read-only mode");
+    await expect(run()).rejects.toThrow("read-only mode");
+    expect(executeJxa).not.toHaveBeenCalled();
+    expect(resolveNoteTitle).not.toHaveBeenCalled();
+  });
+});
+
+describe("generated scripts embed user strings as JSON literals", () => {
+  const hostile = [
+    `quote " and 'single'`,
+    "back\\slash \\\" mix",
+    "multi\nline\r\nvalue",
+    "line\u2028separator\u2029para",
+    "'); app.quit(); ('",
+    '"); app.quit(); ("',
+    "`${app.quit()}`",
+  ];
+
+  it.each(hostile)("createNote round-trips title and folder %j", async (value) => {
+    vi.mocked(executeJxa).mockResolvedValueOnce(JSON.stringify({ id: "n", title: value, folder: value }));
+
+    await createNote(value, "body", value);
+
+    const script = scriptOf(0);
+    expect(constLiteral(script, "title")).toBe(value);
+    expect(constLiteral(script, "folderName")).toBe(value);
+    expect(script).toContain(`const title = ${JSON.stringify(value)};`);
   });
 
-  it("should not throw when READONLY_MODE is false", () => {
-    process.env.READONLY_MODE = "false";
-    expect(() => checkReadOnly()).not.toThrow();
+  it.each(hostile)("updateNote round-trips the body %j", async (value) => {
+    resolvesTo();
+    vi.mocked(executeJxa).mockResolvedValueOnce(JSON.stringify({ newTitle: "Test" }));
+
+    await updateNote("Test", value);
+
+    expect(scriptOf(0)).toContain(`note.body = ${JSON.stringify(`<p>${value}</p>`)};`);
+  });
+
+  it.each(hostile)("moveNote round-trips the folder %j", async (value) => {
+    resolvesTo({ id: value, title: "Test", folder: "Work" });
+    vi.mocked(executeJxa).mockResolvedValueOnce(JSON.stringify({ toFolder: "Archive" }));
+
+    await moveNote("Test", value);
+
+    const script = scriptOf(0);
+    expect(script).toContain(`findFolder(${JSON.stringify(value)}, 'Folder')`);
+    expect(script).toContain(`app.notes.byId(${JSON.stringify(value)})`);
   });
 });
 
 describe("createNote", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    delete process.env.READONLY_MODE;
-  });
-
-  it("should throw if READONLY_MODE is enabled", async () => {
-    process.env.READONLY_MODE = "true";
-    await expect(createNote("Test", "Content")).rejects.toThrow("read-only mode");
-  });
-
-  it("should create note successfully", async () => {
-    vi.mocked(runJxa).mockResolvedValueOnce(
-      JSON.stringify({ id: "note-1", title: "New Note", folder: "Work" })
+  it("writes the title as the first line so Apple Notes keeps it", async () => {
+    vi.mocked(executeJxa).mockResolvedValueOnce(
+      JSON.stringify({ id: "note-1", title: "Groceries", folder: "Work" })
     );
 
-    await expect(createNote("New Note", "Content", "Work")).resolves.toEqual({
+    await expect(createNote("Groceries", "milk\neggs", "Work")).resolves.toEqual({
       id: "note-1",
-      title: "New Note",
+      title: "Groceries",
       folder: "Work",
-      requestedTitle: "New Note",
+      requestedTitle: "Groceries",
       titleChanged: false,
     });
+    expect(constLiteral(scriptOf(0), "content")).toBe("<h1>Groceries</h1><p>milk\neggs</p>");
   });
 
-  it("should allow duplicate titles (Apple Notes uses IDs)", async () => {
-    vi.mocked(runJxa).mockResolvedValueOnce(
-      JSON.stringify({ id: "note-2", title: "Existing Note", folder: "Notes" })
+  it.each(["# Groceries\n\nmilk", "Groceries\nmilk", "  ## Groceries  \nmilk"])(
+    "does not duplicate a title the content already starts with (%j)",
+    async (content) => {
+      vi.mocked(executeJxa).mockResolvedValueOnce(
+        JSON.stringify({ id: "n", title: "Groceries", folder: "Notes" })
+      );
+
+      await createNote("Groceries", content);
+
+      expect(constLiteral(scriptOf(0), "content")).toBe(`<p>${content}</p>`);
+    }
+  );
+
+  it("escapes HTML in the title heading", async () => {
+    vi.mocked(executeJxa).mockResolvedValueOnce(JSON.stringify({ id: "n", title: "a<b>&c", folder: "Notes" }));
+
+    await createNote("a<b>&c", "body");
+
+    expect(constLiteral(scriptOf(0), "content")).toBe("<h1>a&lt;b&gt;&amp;c</h1><p>body</p>");
+  });
+
+  it("uses the default folder when none is given", async () => {
+    vi.mocked(executeJxa).mockResolvedValueOnce(JSON.stringify({ id: "n", title: "T", folder: "Notes" }));
+
+    await createNote("T", "body");
+
+    expect(constLiteral(scriptOf(0), "folderName")).toBeNull();
+    expect(scriptOf(0)).toContain("defaultFolder()");
+  });
+
+  it("reports a title Apple Notes changed", async () => {
+    vi.mocked(executeJxa).mockResolvedValueOnce(JSON.stringify({ id: "n", title: "Other", folder: "Notes" }));
+
+    const result = await createNote("Requested", "body");
+    expect(result).toMatchObject({ title: "Other", requestedTitle: "Requested", titleChanged: true });
+  });
+
+  it("propagates an ambiguous folder error", async () => {
+    vi.mocked(executeJxa).mockRejectedValueOnce(
+      new Error('JXA execution failed: Multiple folders match "Notes": iCloud/Notes, On My Mac/Notes.')
     );
 
-    // Should not throw even if a note with same title exists
-    await expect(createNote("Existing Note", "Content")).resolves.toEqual({
-      id: "note-2",
-      title: "Existing Note",
-      folder: "Notes",
-      requestedTitle: "Existing Note",
-      titleChanged: false,
-    });
+    await expect(createNote("T", "body", "Notes")).rejects.toThrow("iCloud/Notes, On My Mac/Notes");
   });
 });
 
 describe("updateNote", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    delete process.env.READONLY_MODE;
-  });
-
-  it("should throw if READONLY_MODE is enabled", async () => {
-    process.env.READONLY_MODE = "true";
-    await expect(updateNote("Test", "Content")).rejects.toThrow("read-only mode");
-  });
-
   it("should throw if note not found", async () => {
-    vi.mocked(resolveNoteTitle).mockResolvedValueOnce({
-      success: false,
-      error: "Note not found",
-    });
+    vi.mocked(resolveNoteTitle).mockResolvedValueOnce({ success: false, error: "Note not found" });
     await expect(updateNote("Missing Note", "Content")).rejects.toThrow("Note not found");
   });
 
   it("should update note successfully", async () => {
-    vi.mocked(resolveNoteTitle).mockResolvedValueOnce({
-      success: true,
-      note: { id: "123", title: "Test", folder: "Work" },
-    });
-    // Mock JXA returning the new title (same as original in this case)
-    vi.mocked(runJxa).mockResolvedValueOnce(JSON.stringify({ newTitle: "Test" }));
+    resolvesTo();
+    vi.mocked(executeJxa).mockResolvedValueOnce(JSON.stringify({ newTitle: "Test" }));
 
-    const result = await updateNote("Test", "New Content");
-    expect(result).toEqual({
+    await expect(updateNote("Test", "New Content")).resolves.toEqual({
       id: "123",
       originalTitle: "Test",
       newTitle: "Test",
@@ -141,248 +240,153 @@ describe("updateNote", () => {
   });
 
   it("should detect when Apple Notes renames the note", async () => {
-    vi.mocked(resolveNoteTitle).mockResolvedValueOnce({
-      success: true,
-      note: { id: "123", title: "Original Title", folder: "Work" },
-    });
-    // Mock JXA returning a different title (Apple Notes renamed it)
-    vi.mocked(runJxa).mockResolvedValueOnce(JSON.stringify({ newTitle: "New Heading" }));
+    resolvesTo({ id: "123", title: "Original Title", folder: "Work" });
+    vi.mocked(executeJxa).mockResolvedValueOnce(JSON.stringify({ newTitle: "New Heading" }));
 
     const result = await updateNote("Original Title", "# New Heading\n\nContent");
-    expect(result).toEqual({
-      id: "123",
-      originalTitle: "Original Title",
-      newTitle: "New Heading",
-      folder: "Work",
-      titleChanged: true,
-    });
+    expect(result).toMatchObject({ newTitle: "New Heading", titleChanged: true });
   });
 
   it("should include suggestions in error when multiple notes found", async () => {
-    vi.mocked(resolveNoteTitle).mockResolvedValueOnce({
-      success: false,
-      error: "Multiple notes found",
-      suggestions: [
-        { id: "id-1", folder: "Work", title: "Note", created: "2026-01-09T10:00:00.000Z" },
-        { id: "id-2", folder: "Personal", title: "Note", created: "2026-01-09T11:00:00.000Z" },
-      ],
-    });
+    vi.mocked(resolveNoteTitle).mockResolvedValueOnce(DUPLICATE_RESOLUTION);
     await expect(updateNote("Note", "Content")).rejects.toThrow("Use ID prefix");
   });
 });
 
 describe("deleteNote", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    delete process.env.READONLY_MODE;
-  });
-
-  it("should throw if READONLY_MODE is enabled", async () => {
-    process.env.READONLY_MODE = "true";
-    await expect(deleteNote("Test")).rejects.toThrow("read-only mode");
-  });
-
   it("should throw if note not found", async () => {
-    vi.mocked(resolveNoteTitle).mockResolvedValueOnce({
-      success: false,
-      error: "Note not found",
-    });
+    vi.mocked(resolveNoteTitle).mockResolvedValueOnce({ success: false, error: "Note not found" });
     await expect(deleteNote("Missing Note")).rejects.toThrow("Note not found");
   });
 
-  it("should delete note successfully", async () => {
-    vi.mocked(resolveNoteTitle).mockResolvedValueOnce({
-      success: true,
-      note: { id: "123", title: "Test", folder: "Work" },
-    });
-    vi.mocked(runJxa).mockResolvedValueOnce("ok");
+  it("should delete the resolved note by id", async () => {
+    resolvesTo();
+    vi.mocked(executeJxa).mockResolvedValueOnce("ok");
 
-    await expect(deleteNote("Test")).resolves.toEqual({
-      id: "123",
-      title: "Test",
-      folder: "Work",
-    });
+    await expect(deleteNote("Test")).resolves.toEqual(WORK_NOTE);
+    expect(scriptOf(0)).toContain('app.notes.byId("123")');
   });
 
   it("should include suggestions in error when multiple notes found", async () => {
-    vi.mocked(resolveNoteTitle).mockResolvedValueOnce({
-      success: false,
-      error: "Multiple notes found",
-      suggestions: [
-        { id: "id-1", folder: "Work", title: "Note", created: "2026-01-09T10:00:00.000Z" },
-        { id: "id-2", folder: "Personal", title: "Note", created: "2026-01-09T11:00:00.000Z" },
-      ],
-    });
+    vi.mocked(resolveNoteTitle).mockResolvedValueOnce(DUPLICATE_RESOLUTION);
     await expect(deleteNote("Note")).rejects.toThrow("Use ID prefix");
   });
 });
 
 describe("moveNote", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    delete process.env.READONLY_MODE;
-  });
+  it("should report the folder Notes actually moved the note to", async () => {
+    resolvesTo();
+    vi.mocked(executeJxa).mockResolvedValueOnce(JSON.stringify({ toFolder: "Archive" }));
 
-  it("should throw if READONLY_MODE is enabled", async () => {
-    process.env.READONLY_MODE = "true";
-    await expect(moveNote("Test", "NewFolder")).rejects.toThrow("read-only mode");
-  });
-
-  it("should throw if note not found", async () => {
-    vi.mocked(resolveNoteTitle).mockResolvedValueOnce({
-      success: false,
-      error: "Note not found",
-    });
-    await expect(moveNote("Missing Note", "NewFolder")).rejects.toThrow("Note not found");
-  });
-
-  it("should move note successfully", async () => {
-    vi.mocked(resolveNoteTitle).mockResolvedValueOnce({
-      success: true,
-      note: { id: "123", title: "Test", folder: "Work" },
-    });
-    vi.mocked(runJxa).mockResolvedValueOnce("ok");
-
-    await expect(moveNote("Test", "Personal")).resolves.toEqual({
+    await expect(moveNote("Test", "iCloud/Archive")).resolves.toEqual({
       id: "123",
       title: "Test",
       fromFolder: "Work",
-      toFolder: "Personal",
+      toFolder: "Archive",
     });
   });
 
   it("should include suggestions in error when multiple notes found", async () => {
-    vi.mocked(resolveNoteTitle).mockResolvedValueOnce({
-      success: false,
-      error: "Multiple notes found",
-      suggestions: [
-        { id: "id-1", folder: "Work", title: "Note", created: "2026-01-09T10:00:00.000Z" },
-        { id: "id-2", folder: "Personal", title: "Note", created: "2026-01-09T11:00:00.000Z" },
-      ],
-    });
+    vi.mocked(resolveNoteTitle).mockResolvedValueOnce(DUPLICATE_RESOLUTION);
     await expect(moveNote("Note", "Archive")).rejects.toThrow("Use ID prefix");
   });
 });
 
 describe("editTable", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    delete process.env.READONLY_MODE;
-  });
-
-  it("should throw if READONLY_MODE is enabled", async () => {
-    process.env.READONLY_MODE = "true";
-    await expect(editTable("Test", 0, [])).rejects.toThrow("read-only mode");
-  });
+  const edits = [{ row: 1, column: 0, value: "✅ Done" }];
 
   it("should throw if note not found", async () => {
-    vi.mocked(resolveNoteTitle).mockResolvedValueOnce({
-      success: false,
-      error: "Note not found",
-    });
-    await expect(editTable("Missing", 0, [{ row: 0, column: 0, value: "x" }])).rejects.toThrow("Note not found");
+    vi.mocked(resolveNoteTitle).mockResolvedValueOnce({ success: false, error: "Note not found" });
+    await expect(editTable("Missing", 0, edits)).rejects.toThrow("Note not found");
   });
 
-  it("should throw if table index out of bounds", async () => {
-    vi.mocked(resolveNoteTitle).mockResolvedValueOnce({
-      success: true,
-      note: { id: "123", title: "Test", folder: "Work" },
-    });
-    vi.mocked(runJxa).mockResolvedValueOnce(JSON.stringify({ html: "<div>No tables</div>" }));
-    vi.mocked(findTables).mockReturnValueOnce([]);
-
-    await expect(editTable("Test", 0, [{ row: 0, column: 0, value: "x" }]))
-      .rejects.toThrow("Table index 0 out of bounds");
-  });
-
-  it("should update table cells and save", async () => {
-    vi.mocked(resolveNoteTitle).mockResolvedValueOnce({
-      success: true,
-      note: { id: "123", title: "Test", folder: "Work" },
-    });
-    vi.mocked(runJxa)
-      .mockResolvedValueOnce(JSON.stringify({ html: "<div><object><table></table></object></div>" }))
-      .mockResolvedValueOnce("ok");
-    vi.mocked(findTables).mockReturnValueOnce(["<object><table></table></object>"]);
-    vi.mocked(updateTableCell).mockReturnValueOnce("<object><table>updated</table></object>");
-
-    await expect(editTable("Test", 0, [{ row: 1, column: 0, value: "✅ Done" }]))
-      .resolves.toBeUndefined();
-
-    expect(updateTableCell).toHaveBeenCalledWith(
-      "<object><table></table></object>",
-      1,
-      0,
-      "✅ Done"
+  it("should propagate out-of-range errors without writing", async () => {
+    resolvesTo();
+    vi.mocked(executeJxa).mockResolvedValueOnce(
+      JSON.stringify({ html: "<div>No tables</div>", modified: "2026-01-01T00:00:00.000Z" })
     );
+    vi.mocked(applyTableEdits).mockImplementationOnce(() => {
+      throw new Error("Table index 0 out of bounds (note has 0 tables)");
+    });
+
+    await expect(editTable("Test", 0, edits)).rejects.toThrow("Table index 0 out of bounds");
+    expect(executeJxa).toHaveBeenCalledTimes(1);
+  });
+
+  it("should write the edited HTML guarded by the read-time modification date", async () => {
+    resolvesTo();
+    vi.mocked(executeJxa)
+      .mockResolvedValueOnce(JSON.stringify({ html: "<table>old</table>", modified: "2026-01-01T00:00:00.000Z" }))
+      .mockResolvedValueOnce(JSON.stringify({ title: "Test", folder: "Work" }));
+    vi.mocked(applyTableEdits).mockReturnValueOnce("<table>new $& $1</table>");
+
+    await expect(editTable("Test", 0, edits)).resolves.toEqual(WORK_NOTE);
+
+    expect(applyTableEdits).toHaveBeenCalledWith("<table>old</table>", 0, edits);
+    const write = scriptOf(1);
+    expect(write).toContain(`note.body = ${JSON.stringify("<table>new $& $1</table>")};`);
+    expect(write).toContain(`!== ${JSON.stringify("2026-01-01T00:00:00.000Z")}`);
+    expect(write.indexOf("modificationDate()")).toBeLessThan(write.indexOf("note.body ="));
+  });
+
+  it("should surface a concurrent modification instead of overwriting", async () => {
+    resolvesTo();
+    vi.mocked(executeJxa)
+      .mockResolvedValueOnce(JSON.stringify({ html: "<table></table>", modified: "2026-01-01T00:00:00.000Z" }))
+      .mockRejectedValueOnce(new Error("JXA execution failed: Note was modified while the table edit was prepared"));
+    vi.mocked(applyTableEdits).mockReturnValueOnce("<table>new</table>");
+
+    await expect(editTable("Test", 0, edits)).rejects.toThrow("Note was modified");
   });
 });
 
 describe("batchDelete", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    delete process.env.READONLY_MODE;
-  });
-
   it("should throw if both titles and folder provided", async () => {
-    await expect(
-      batchDelete({ titles: ["Note"], folder: "Folder" })
-    ).rejects.toThrow("Specify either titles or folder, not both");
+    await expect(batchDelete({ titles: ["Note"], folder: "Folder" })).rejects.toThrow(
+      "Specify either titles or folder, not both"
+    );
   });
 
   it("should throw if neither titles nor folder provided", async () => {
     await expect(batchDelete({})).rejects.toThrow("Specify either titles or folder");
   });
 
-  it("should throw in readonly mode", async () => {
-    process.env.READONLY_MODE = "true";
-    await expect(batchDelete({ titles: ["Note"] })).rejects.toThrow("read-only mode");
+  it("should return the deleted notes and per-note failures of a folder", async () => {
+    vi.mocked(executeJxa).mockResolvedValueOnce(
+      JSON.stringify({
+        deleted: [{ id: "a", title: "A", folder: "Old" }],
+        failed: ["Locked"],
+      })
+    );
+
+    await expect(batchDelete({ folder: "Old" })).resolves.toEqual({
+      deleted: [{ id: "a", title: "A", folder: "Old" }],
+      failed: ["Locked"],
+    });
+    // Ids are captured before deleting, then each note is deleted by id.
+    const script = scriptOf(0);
+    expect(script).toContain("folder.notes.id()");
+    expect(script).toContain("app.notes.byId(ids[i]).delete()");
   });
 
-  it("should delete all notes in a folder", async () => {
-    vi.mocked(runJxa).mockResolvedValue(JSON.stringify({ deletedCount: 5 }));
-
-    const result = await batchDelete({ folder: "Old Project" });
-
-    expect(result.deleted).toBe(5);
-    expect(result.failed).toEqual([]);
-  });
-
-  it("should delete individual notes by title", async () => {
-    vi.mocked(resolveNoteTitle)
-      .mockResolvedValueOnce({ success: true, note: { id: "1", title: "Note 1", folder: "Work" } })
-      .mockResolvedValueOnce({ success: true, note: { id: "2", title: "Note 2", folder: "Work" } });
-    vi.mocked(runJxa).mockResolvedValue("ok");
-
-    const result = await batchDelete({ titles: ["Note 1", "Note 2"] });
-
-    expect(result.deleted).toBe(2);
-    expect(result.failed).toEqual([]);
-  });
-
-  it("should track failed deletions", async () => {
+  it("should delete individual notes by title and track failures", async () => {
     vi.mocked(resolveNoteTitle)
       .mockResolvedValueOnce({ success: true, note: { id: "1", title: "Note 1", folder: "Work" } })
       .mockResolvedValueOnce({ success: false, error: "Note not found" });
-    vi.mocked(runJxa).mockResolvedValue("ok");
+    vi.mocked(executeJxa).mockResolvedValue("ok");
 
-    const result = await batchDelete({ titles: ["Note 1", "Missing Note"] });
-
-    expect(result.deleted).toBe(1);
-    expect(result.failed).toEqual(["Missing Note"]);
+    await expect(batchDelete({ titles: ["Note 1", "Missing Note"] })).resolves.toEqual({
+      deleted: [{ id: "1", title: "Note 1", folder: "Work" }],
+      failed: ["Missing Note"],
+    });
   });
 });
 
 describe("batchMove", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    delete process.env.READONLY_MODE;
-  });
-
   it("should throw if targetFolder missing", async () => {
-    await expect(
-      batchMove({ titles: ["Note"], targetFolder: "" })
-    ).rejects.toThrow("targetFolder is required");
+    await expect(batchMove({ titles: ["Note"], targetFolder: "" })).rejects.toThrow(
+      "targetFolder is required"
+    );
   });
 
   it("should throw if both titles and sourceFolder provided", async () => {
@@ -392,49 +396,35 @@ describe("batchMove", () => {
   });
 
   it("should throw if neither titles nor sourceFolder provided", async () => {
-    await expect(
-      batchMove({ targetFolder: "Archive" })
-    ).rejects.toThrow("Specify either titles or sourceFolder");
+    await expect(batchMove({ targetFolder: "Archive" })).rejects.toThrow(
+      "Specify either titles or sourceFolder"
+    );
   });
 
-  it("should throw in readonly mode", async () => {
-    process.env.READONLY_MODE = "true";
-    await expect(batchMove({ sourceFolder: "Temp", targetFolder: "Archive" })).rejects.toThrow("read-only mode");
-  });
+  it("should return the moved notes of a folder with source and target", async () => {
+    const moved = [{ id: "a", title: "A", folder: "Archive", fromFolder: "Temp" }];
+    vi.mocked(executeJxa).mockResolvedValueOnce(JSON.stringify({ moved, failed: [] }));
 
-  it("should move all notes from source folder", async () => {
-    vi.mocked(runJxa).mockResolvedValue(JSON.stringify({ movedCount: 3 }));
-
-    const result = await batchMove({
-      sourceFolder: "Temp",
-      targetFolder: "Archive",
+    await expect(batchMove({ sourceFolder: "Temp", targetFolder: "Archive" })).resolves.toEqual({
+      moved,
+      failed: [],
     });
-
-    expect(result.moved).toBe(3);
-    expect(result.failed).toEqual([]);
+    const script = scriptOf(0);
+    expect(script).toContain(`findFolder("Temp", 'Source folder')`);
+    expect(script).toContain(`findFolder("Archive", 'Target folder')`);
   });
 
-  it("should move individual notes by title", async () => {
-    vi.mocked(resolveNoteTitle)
-      .mockResolvedValueOnce({ success: true, note: { id: "1", title: "Note 1", folder: "Work" } })
-      .mockResolvedValueOnce({ success: true, note: { id: "2", title: "Note 2", folder: "Work" } });
-    vi.mocked(runJxa).mockResolvedValue("ok");
-
-    const result = await batchMove({ titles: ["Note 1", "Note 2"], targetFolder: "Archive" });
-
-    expect(result.moved).toBe(2);
-    expect(result.failed).toEqual([]);
-  });
-
-  it("should track failed moves", async () => {
+  it("should move individual notes by title and track failures", async () => {
     vi.mocked(resolveNoteTitle)
       .mockResolvedValueOnce({ success: true, note: { id: "1", title: "Note 1", folder: "Work" } })
       .mockResolvedValueOnce({ success: false, error: "Note not found" });
-    vi.mocked(runJxa).mockResolvedValue("ok");
+    vi.mocked(executeJxa).mockResolvedValue(JSON.stringify({ toFolder: "Archive" }));
 
-    const result = await batchMove({ titles: ["Note 1", "Missing Note"], targetFolder: "Archive" });
-
-    expect(result.moved).toBe(1);
-    expect(result.failed).toEqual(["Missing Note"]);
+    await expect(
+      batchMove({ titles: ["Note 1", "Missing Note"], targetFolder: "Archive" })
+    ).resolves.toEqual({
+      moved: [{ id: "1", title: "Note 1", folder: "Archive", fromFolder: "Work" }],
+      failed: ["Missing Note"],
+    });
   });
 });

@@ -1,40 +1,30 @@
 // src/config/paths.test.ts
 import { describe, it, expect } from "vitest";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { getProjectRoot, isNpmInstall } from "./paths.js";
 
-describe("config paths", () => {
-  describe("getConfigDir", () => {
-    it("should return ~/.apple-notes-mcp", async () => {
-      const { getConfigDir } = await import("./paths.js");
-      expect(getConfigDir()).toMatch(/\.apple-notes-mcp$/);
-    });
+describe("getProjectRoot", () => {
+  it("points at the package root that contains this config module", () => {
+    const root = getProjectRoot();
+
+    expect(existsSync(join(root, "src", "config", "paths.ts"))).toBe(true);
+    const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf-8"));
+    expect(pkg.name).toBe("@disco_trooper/apple-notes-mcp");
   });
 
-  describe("getEnvPath", () => {
-    it("should return config dir + .env", async () => {
-      const { getEnvPath, getConfigDir } = await import("./paths.js");
-      expect(getEnvPath()).toBe(`${getConfigDir()}/.env`);
-    });
+  it("is a decoded filesystem path, not a percent-encoded URL path", () => {
+    expect(getProjectRoot()).not.toMatch(/%[0-9A-F]{2}/i);
   });
+});
 
-  describe("getDataDir", () => {
-    it("should return config dir + data", async () => {
-      const { getDataDir, getConfigDir } = await import("./paths.js");
-      expect(getDataDir()).toBe(`${getConfigDir()}/data`);
-    });
-  });
-
-  describe("isNpmInstall", () => {
-    it("should detect npm install from path", async () => {
-      const { isNpmInstall } = await import("./paths.js");
-      // Running from source, should be false
-      expect(isNpmInstall()).toBe(false);
-    });
-  });
-
-  describe("getProjectRoot", () => {
-    it("should return project root directory", async () => {
-      const { getProjectRoot } = await import("./paths.js");
-      expect(getProjectRoot()).toMatch(/apple-notes-mcp$/);
-    });
+describe("isNpmInstall", () => {
+  it.each([
+    ["/usr/local/lib/node_modules/@disco_trooper/apple-notes-mcp/src/config/paths.ts", true],
+    ["/Users/jan/proj/node_modules/@disco_trooper/apple-notes-mcp/src/config/paths.ts", true],
+    ["/Users/jan/.npm/_npx/abc/node_modules/x/src/config/paths.ts", true],
+    ["/Users/Jan Novák/code/apple-notes-mcp/src/config/paths.ts", false],
+  ])("%s -> %s", (modulePath, expected) => {
+    expect(isNpmInstall(modulePath)).toBe(expected);
   });
 });

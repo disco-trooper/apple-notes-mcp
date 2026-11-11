@@ -3,7 +3,6 @@
   "version": "1.9.0",
   "description": "MCP server for Apple Notes with semantic search and CRUD operations",
   "type": "module",
-  "main": "src/index.ts",
   "scripts": {
     "start": "bun run src/index.ts",
     "setup": "bun run src/setup.ts",
@@ -17,13 +16,12 @@
     "@clack/prompts": "^0.8.0",
     "@huggingface/transformers": "^3.0.0",
     "@lancedb/lancedb": "^0.13.0",
-    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@modelcontextprotocol/sdk": "^1.32.0",
     "apache-arrow": "^21.1.0",
-    "dotenv": "^16.4.0",
+    "dotenv": "^16.6.0",
     "marked": "^15.0.0",
-    "run-jxa": "^3.0.0",
     "turndown": "^7.2.0",
-    "zod": "^3.24.0"
+    "zod": "^3.25.0"
   },
   "devDependencies": {
     "@types/bun": "^1.1.0",
@@ -47,10 +45,12 @@
   },
   "files": [
     "src",
-    "README.md"
+    "!src/**/*.test.ts",
+    "README.md",
+    "CHANGELOG.md"
   ],
   "engines": {
-    "node": ">=18"
+    "bun": ">=1.1.0"
   },
   "os": [
     "darwin"

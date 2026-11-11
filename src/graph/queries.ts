@@ -5,7 +5,7 @@
 import { getVectorStore } from "../db/lancedb.js";
 import { createDebugLogger } from "../utils/debug.js";
 import { NoteNotFoundError } from "../errors/index.js";
-import { generatePreview } from "../search/index.js";
+import { generatePreview } from "../utils/text.js";
 import {
   DEFAULT_SEARCH_LIMIT,
   DEFAULT_RELATED_NOTES_LIMIT,
@@ -30,7 +30,7 @@ export async function listTags(): Promise<TagCount[]> {
   debug("Listing all tags");
 
   const store = getVectorStore();
-  const records = await store.getAll();
+  const records = await store.getAllMetadata();
 
   // Aggregate tag counts
   const counts = new Map<string, number>();
@@ -63,15 +63,13 @@ export async function searchByTag(
 ): Promise<SearchResult[]> {
   const { folder, limit = DEFAULT_SEARCH_LIMIT } = options;
 
-  debug(`Searching for tag: ${tag}`);
+  const normalizedTag = tag.replace(/^#/, "").toLowerCase();
+  debug(`Searching for tag: ${normalizedTag}`);
 
   const store = getVectorStore();
-  const records = await store.getAll();
+  const records = await store.getAllMetadata();
 
-  // Filter by tag (case-insensitive)
-  let matches = records.filter((r) =>
-    (r.tags ?? []).includes(tag.toLowerCase())
-  );
+  let matches = records.filter((r) => (r.tags ?? []).includes(normalizedTag));
 
   // Filter by folder if specified
   if (folder) {
@@ -91,7 +89,7 @@ export async function searchByTag(
     score: 1 / (1 + i),
   }));
 
-  debug(`Found ${results.length} notes with tag: ${tag}`);
+  debug(`Found ${results.length} notes with tag: ${normalizedTag}`);
   return results;
 }
 
@@ -124,30 +122,32 @@ export async function findRelatedNotes(
   debug(`Finding related notes for: ${sourceId}`);
 
   const store = getVectorStore();
-  const allRecords = await store.getAll();
-
-  // Find source note
-  const source = allRecords.find((r) => r.id === sourceId);
+  const source = await store.getById(sourceId);
   if (!source) {
     throw new NoteNotFoundError(sourceId);
   }
 
   const results: RelatedNote[] = [];
-  const seen = new Set<string>();
+  const seen = new Set<string>([sourceId]);
+
+  const wantTags = types.includes("tag") && (source.tags?.length ?? 0) > 0;
+  const wantLinks = types.includes("link");
+  const allRecords = wantTags || wantLinks ? await store.getAllMetadata() : [];
 
   // Find by shared tags
-  if (types.includes("tag") && source.tags?.length > 0) {
+  if (wantTags) {
+    const sourceTags = new Set(source.tags);
     for (const record of allRecords) {
-      if (record.id === sourceId || seen.has(record.id)) continue;
+      if (seen.has(record.id)) continue;
 
-      const shared = (record.tags ?? []).filter((t) => source.tags.includes(t));
+      const shared = (record.tags ?? []).filter((t) => sourceTags.has(t));
       if (shared.length > 0) {
         results.push({
           id: record.id,
           title: record.title,
           folder: record.folder,
           relationship: "tag",
-          score: GRAPH_TAG_WEIGHT * (shared.length / source.tags.length),
+          score: GRAPH_TAG_WEIGHT * (shared.length / sourceTags.size),
           sharedTags: shared,
         });
         seen.add(record.id);
@@ -155,19 +155,18 @@ export async function findRelatedNotes(
     }
   }
 
-  // Find by outlinks (notes this note links to)
-  if (types.includes("link")) {
-    for (const linkTitle of source.outlinks ?? []) {
-      // Skip null/undefined links
-      if (!linkTitle) continue;
+  if (wantLinks) {
+    // Outlinks (notes this note links to); duplicate titles resolve to the first note
+    const byTitle = new Map<string, (typeof allRecords)[number]>();
+    for (const record of allRecords) {
+      const key = record.title.toLowerCase();
+      if (!byTitle.has(key)) byTitle.set(key, record);
+    }
 
-      const linked = allRecords.find(
-        (r) =>
-          r.title.toLowerCase() === linkTitle.toLowerCase() &&
-          r.id !== sourceId &&
-          !seen.has(r.id)
-      );
-      if (linked) {
+    for (const linkTitle of source.outlinks ?? []) {
+      if (!linkTitle) continue;
+      const linked = byTitle.get(linkTitle.toLowerCase());
+      if (linked && !seen.has(linked.id)) {
         results.push({
           id: linked.id,
           title: linked.title,
@@ -180,12 +179,13 @@ export async function findRelatedNotes(
       }
     }
 
-    // Find backlinks (notes that link to this note)
+    // Backlinks (notes that link to this note)
+    const sourceTitle = source.title.toLowerCase();
     for (const record of allRecords) {
-      if (record.id === sourceId || seen.has(record.id)) continue;
+      if (seen.has(record.id)) continue;
 
       const linksToSource = (record.outlinks ?? []).some(
-        (l) => l && l.toLowerCase() === source.title.toLowerCase()
+        (l) => l && l.toLowerCase() === sourceTitle
       );
       if (linksToSource) {
         results.push({
@@ -202,20 +202,20 @@ export async function findRelatedNotes(
   }
 
   // Find by semantic similarity
-  if (types.includes("similar") && source.vector?.length > 0) {
+  if (types.includes("similar") && (source.vector?.length ?? 0) > 0) {
     const similarResults = await store.search(source.vector, limit + 1);
 
     for (const similar of similarResults) {
-      if (similar.id === sourceId || seen.has(similar.id ?? "")) continue;
+      if (!similar.id || seen.has(similar.id)) continue;
 
       results.push({
-        id: similar.id ?? "",
+        id: similar.id,
         title: similar.title,
         folder: similar.folder,
         relationship: "similar",
         score: GRAPH_SIMILAR_WEIGHT * similar.score,
       });
-      seen.add(similar.id ?? "");
+      seen.add(similar.id);
     }
   }
 

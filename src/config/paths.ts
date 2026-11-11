@@ -7,6 +7,10 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import { fileURLToPath } from "node:url";
+
+/** Absolute, percent-decoded path of this module. */
+const MODULE_PATH = fileURLToPath(import.meta.url);
 
 /**
  * Get the config directory path.
@@ -38,27 +42,21 @@ export function hasConfig(): boolean {
 }
 
 /**
- * Ensure config directory exists.
+ * Ensure config directory exists, readable only by the owner (it holds the API key).
  */
 export function ensureConfigDir(): void {
   const configDir = getConfigDir();
-  if (!fs.existsSync(configDir)) {
-    fs.mkdirSync(configDir, { recursive: true });
-  }
+  fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(configDir, 0o700);
 }
 
 /**
  * Detect if running from npm global install vs source.
  * Used to generate appropriate Claude Code config.
  */
-export function isNpmInstall(): boolean {
-  const scriptPath = new URL(import.meta.url).pathname;
-  return (
-    scriptPath.includes("/node_modules/") ||
-    scriptPath.includes("/.npm/") ||
-    // Global npm install on macOS
-    scriptPath.includes("/lib/node_modules/")
-  );
+export function isNpmInstall(modulePath: string = MODULE_PATH): boolean {
+  // Covers local, global (/lib/node_modules/) and npx (~/.npm/) installs
+  return modulePath.includes("/node_modules/") || modulePath.includes("/.npm/");
 }
 
 /**
@@ -66,7 +64,7 @@ export function isNpmInstall(): boolean {
  */
 export function getProjectRoot(): string {
   // Navigate up from src/config/paths.ts to project root
-  return path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
+  return path.resolve(path.dirname(MODULE_PATH), "../..");
 }
 
 /**

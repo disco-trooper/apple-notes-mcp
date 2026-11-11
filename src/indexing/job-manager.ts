@@ -3,7 +3,6 @@ import {
   MAX_INDEX_JOB_HISTORY,
 } from "../config/constants.js";
 import { indexNotes, type IndexResult } from "../search/indexer.js";
-import { fullChunkIndex, type ChunkIndexResult } from "../search/chunk-indexer.js";
 import {
   type IndexProgressEvent,
   type IndexRunOptions,
@@ -37,7 +36,6 @@ export interface IndexJob {
   startedAt?: string;
   finishedAt?: string;
   result?: IndexResult;
-  chunkResult?: ChunkIndexResult;
   error?: string;
 }
 
@@ -45,15 +43,20 @@ export interface StartIndexJobOptions {
   mode: "full" | "incremental";
 }
 
+export interface StartIndexJobResult {
+  job: IndexJob;
+  /** True when an already active job was returned instead of starting a new one. */
+  reused: boolean;
+}
+
 interface IndexJobManagerDeps {
   indexNotes: (mode: "full" | "incremental", options?: IndexRunOptions) => Promise<IndexResult>;
-  fullChunkIndex: (options?: IndexRunOptions) => Promise<ChunkIndexResult>;
   now: () => number;
   newId: () => string;
 }
 
 export interface IndexJobManager {
-  start: (options: StartIndexJobOptions) => IndexJob;
+  start: (options: StartIndexJobOptions) => StartIndexJobResult;
   get: (jobId: string) => IndexJob | null;
   list: (limit?: number) => IndexJob[];
   cancel: (jobId: string) => IndexJob | null;
@@ -76,69 +79,27 @@ function getRetentionSeconds(): number {
   return parsed;
 }
 
-function clampPercent(percent: number): number {
-  return Math.max(0, Math.min(100, Math.round(percent)));
-}
-
 function ratio(current: number, total: number): number {
   if (total <= 0) return 0;
   return Math.max(0, Math.min(1, current / total));
 }
 
-function mapProgressForIncremental(event: IndexProgressEvent): number {
+/** Map an indexer stage to an overall percentage (stages run in this order). */
+function mapProgress(event: IndexProgressEvent): number {
+  const r = ratio(event.current, event.total);
   switch (event.stage) {
     case "fetch":
-      return 5 + ratio(event.current, event.total) * 15;
+      return 5 + r * 15;
     case "prepare":
-      return 20 + ratio(event.current, event.total) * 10;
+      return 20 + r * 5;
     case "embed":
-      return 30 + ratio(event.current, event.total) * 35;
+      return 25 + r * 55;
     case "persist":
-      return 65 + ratio(event.current, event.total) * 25;
-    case "delete":
-      return 75 + ratio(event.current, event.total) * 10;
+      return 80 + r * 12;
     case "rebuild-fts":
-      return 90 + ratio(event.current, event.total) * 9;
+      return 92 + r * 7;
     case "done":
       return 99;
-    default:
-      return 10;
-  }
-}
-
-function mapProgressForFullNotes(event: IndexProgressEvent): number {
-  switch (event.stage) {
-    case "fetch":
-      return 5 + ratio(event.current, event.total) * 15;
-    case "prepare":
-      return 20 + ratio(event.current, event.total) * 10;
-    case "embed":
-      return 30 + ratio(event.current, event.total) * 20;
-    case "persist":
-      return 50 + ratio(event.current, event.total) * 15;
-    case "rebuild-fts":
-      return 65 + ratio(event.current, event.total) * 5;
-    case "done":
-      return 70;
-    default:
-      return 10;
-  }
-}
-
-function mapProgressForFullChunks(event: IndexProgressEvent): number {
-  switch (event.stage) {
-    case "fetch":
-      return 70 + ratio(event.current, event.total) * 5;
-    case "prepare":
-      return 75 + ratio(event.current, event.total) * 5;
-    case "embed":
-      return 80 + ratio(event.current, event.total) * 10;
-    case "persist":
-      return 90 + ratio(event.current, event.total) * 5;
-    case "done":
-      return 95;
-    default:
-      return 75;
   }
 }
 
@@ -147,7 +108,6 @@ export function createIndexJobManager(
 ): IndexJobManager {
   const resolvedDeps: IndexJobManagerDeps = {
     indexNotes,
-    fullChunkIndex,
     now: () => Date.now(),
     newId: () => crypto.randomUUID(),
     ...deps,
@@ -194,51 +154,36 @@ export function createIndexJobManager(
     for (let i = order.length - 1; i >= 0; i -= 1) {
       const job = jobs.get(order[i]);
       if (!job) continue;
-      if (
-        (job.status === "queued" || job.status === "running" || job.status === "cancelling")
-      ) {
+      if (job.status === "queued" || job.status === "running" || job.status === "cancelling") {
         return job;
       }
     }
     return null;
   }
 
+  /** Running progress never moves backwards; terminal phases set their own value. */
   function setProgress(job: IndexJob, phase: string, percent: number, message: string): void {
+    const clamped = Math.max(0, Math.min(100, Math.round(percent)));
     job.progress = {
       phase,
-      percent: clampPercent(percent),
+      percent: Math.max(job.progress.percent, clamped),
       message,
     };
   }
 
-  function noteProgressHandler(job: IndexJob) {
-    return (event: IndexProgressEvent): void => {
-      if (job.status === "cancelling") {
-        return;
-      }
-      const percent =
-        job.mode === "incremental"
-          ? mapProgressForIncremental(event)
-          : mapProgressForFullNotes(event);
-      setProgress(job, `indexing-notes/${event.stage}`, percent, event.message);
-    };
-  }
-
-  function chunkProgressHandler(job: IndexJob) {
-    return (event: IndexProgressEvent): void => {
-      if (job.status === "cancelling") {
-        return;
-      }
-      const percent = mapProgressForFullChunks(event);
-      setProgress(job, `indexing-chunks/${event.stage}`, percent, event.message);
-    };
+  function finish(
+    job: IndexJob,
+    status: "completed" | "failed" | "cancelled",
+    message: string
+  ): void {
+    job.status = status;
+    job.finishedAt = new Date(resolvedDeps.now()).toISOString();
+    setProgress(job, status, 100, message);
   }
 
   async function run(jobId: string): Promise<void> {
     const job = jobs.get(jobId);
-    if (!job) return;
-
-    if (job.status === "cancelled") {
+    if (!job || job.status === "cancelled") {
       return;
     }
 
@@ -248,37 +193,28 @@ export function createIndexJobManager(
     try {
       job.status = "running";
       job.startedAt = new Date(resolvedDeps.now()).toISOString();
-      setProgress(job, "indexing-notes", 5, `Running ${job.mode} index`);
+      setProgress(job, "indexing", 5, `Running ${job.mode} index`);
 
-      const result = await resolvedDeps.indexNotes(job.mode, {
+      job.result = await resolvedDeps.indexNotes(job.mode, {
         signal: controller.signal,
-        onProgress: noteProgressHandler(job),
+        onProgress: (event) => {
+          if (job.status === "cancelling") return;
+          setProgress(job, `indexing/${event.stage}`, mapProgress(event), event.message);
+        },
       });
-      job.result = result;
 
-      if (job.mode === "full") {
-        setProgress(job, "indexing-chunks", 70, "Building chunk index");
-        const chunkResult = await resolvedDeps.fullChunkIndex({
-          signal: controller.signal,
-          onProgress: chunkProgressHandler(job),
-        });
-        job.chunkResult = chunkResult;
-      }
-
-      job.status = "completed";
-      job.finishedAt = new Date(resolvedDeps.now()).toISOString();
-      setProgress(job, "completed", 100, "Index job completed");
-    } catch (error) {
-      const cancelled = controller.signal.aborted || isIndexCancelledError(error);
-      if (cancelled) {
-        job.status = "cancelled";
-        job.finishedAt = new Date(resolvedDeps.now()).toISOString();
-        setProgress(job, "cancelled", 100, "Index job cancelled");
+      if (controller.signal.aborted) {
+        // The indexer passed its last cancellation point and wrote its changes.
+        finish(job, "cancelled", "Index job cancelled after its changes were written");
       } else {
-        job.status = "failed";
-        job.finishedAt = new Date(resolvedDeps.now()).toISOString();
+        finish(job, "completed", "Index job completed");
+      }
+    } catch (error) {
+      if (controller.signal.aborted || isIndexCancelledError(error)) {
+        finish(job, "cancelled", "Index job cancelled");
+      } else {
         job.error = sanitizeErrorMessage(error instanceof Error ? error.message : String(error));
-        setProgress(job, "failed", 100, "Index job failed");
+        finish(job, "failed", "Index job failed");
         debug("Background index job failed:", error);
       }
     } finally {
@@ -287,12 +223,12 @@ export function createIndexJobManager(
     }
   }
 
-  function start(options: StartIndexJobOptions): IndexJob {
+  function start(options: StartIndexJobOptions): StartIndexJobResult {
     prune();
 
     const existing = getActiveJob();
     if (existing) {
-      return cloneJob(existing);
+      return { job: cloneJob(existing), reused: true };
     }
 
     const id = resolvedDeps.newId();
@@ -315,7 +251,7 @@ export function createIndexJobManager(
       void run(id);
     });
 
-    return cloneJob(job);
+    return { job: cloneJob(job), reused: false };
   }
 
   function get(jobId: string): IndexJob | null {
@@ -346,9 +282,7 @@ export function createIndexJobManager(
     }
 
     if (job.status === "queued") {
-      job.status = "cancelled";
-      job.finishedAt = new Date(resolvedDeps.now()).toISOString();
-      setProgress(job, "cancelled", 100, "Index job cancelled before start");
+      finish(job, "cancelled", "Index job cancelled before start");
       return cloneJob(job);
     }
 

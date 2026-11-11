@@ -1,134 +1,90 @@
 /**
- * Chunk indexer for Parent Document Retriever pattern.
- * Splits notes into overlapping chunks, generates embeddings, and stores in LanceDB.
+ * Note preparation and chunking for the Parent Document Retriever pattern.
+ *
+ * prepareNote() is the single content-prep step for BOTH index tables:
+ * it redacts secrets and strips Base64 before anything is stored or sent
+ * to an embedding provider.
  */
 
-import { getEmbeddingBatch } from "../embeddings/index.js";
 import { getChunkStore, type ChunkRecord } from "../db/lancedb.js";
-import { getAllNotesWithFallback, type NoteDetails } from "../notes/read.js";
+import type { NoteDetails } from "../notes/read.js";
 import { chunkText } from "../utils/chunker.js";
 import { extractMetadata } from "../graph/extract.js";
-import {
-  DEFAULT_CHUNK_SIZE,
-  DEFAULT_CHUNK_OVERLAP,
-  getEmbeddingBatchSize,
-} from "../config/constants.js";
+import { DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP } from "../config/constants.js";
 import { createDebugLogger } from "../utils/debug.js";
-import { filterContent, shouldIndexContent } from "../utils/content-filter.js";
-import {
-  type IndexRunOptions,
-  type IndexProgressEvent,
-  throwIfCancelled,
-} from "../indexing/contracts.js";
+import { filterContent } from "../utils/content-filter.js";
 
-// Debug logging
 const debug = createDebugLogger("CHUNK-INDEXER");
 
-/**
- * Result of a chunk indexing operation.
- */
-export interface ChunkIndexResult {
-  /** Total number of notes processed */
-  totalNotes: number;
-  /** Total number of chunks created */
-  totalChunks: number;
-  /** Number of chunks indexed (with embeddings) */
-  indexed: number;
-  /** Time taken in milliseconds */
-  timeMs: number;
-  /** Notes that could not be read (locked, syncing, corrupted) */
-  skippedNotes?: string[];
-}
-
-/** Chunk record for internal processing - explicit types to avoid index signature issues */
-interface InternalChunkRecord {
-  chunk_id: string;
-  note_id: string;
-  note_title: string;
-  folder: string;
-  chunk_index: number;
-  total_chunks: number;
-  content: string;
-  vector: number[];
-  created: string;
-  modified: string;
-  indexed_at: string;
+/** A note whose content has been filtered and is ready to embed. */
+export interface PreparedNote {
+  note: NoteDetails;
+  /** Filtered content (Base64 removed, secrets redacted). */
+  text: string;
+  /** Tags extracted from the original content. */
   tags: string[];
+  /** Wiki-link targets extracted from the original content. */
   outlinks: string[];
 }
 
-function chunks<T>(array: T[], size: number): T[][] {
-  const result: T[][] = [];
-  for (let i = 0; i < array.length; i += size) {
-    result.push(array.slice(i, i + size));
-  }
-  return result;
-}
-
-function emitProgress(
-  options: IndexRunOptions,
-  stage: IndexProgressEvent["stage"],
-  current: number,
-  total: number,
-  message: string
-): void {
-  options.onProgress?.({
-    stage,
-    current,
-    total,
-    message,
-  });
-}
+/**
+ * Chunk row before embedding. Pick (not Omit): ChunkRecord has an index
+ * signature, which makes Omit collapse every named field.
+ */
+export type UnembeddedChunk = Pick<
+  ChunkRecord,
+  | "chunk_id"
+  | "note_id"
+  | "note_title"
+  | "folder"
+  | "chunk_index"
+  | "total_chunks"
+  | "content"
+  | "created"
+  | "modified"
+  | "tags"
+  | "outlinks"
+>;
 
 /**
- * Convert a note into chunk records WITHOUT vectors.
- * Vectors are added later during batch embedding generation.
+ * Filter a note's content for indexing.
  *
- * Filters out Base64/binary content before chunking to improve search quality.
- *
- * @param note - The note to chunk
- * @returns Array of ChunkRecord with empty vectors
+ * Returns null when nothing indexable remains (empty note, binary or mostly
+ * encoded content). Short notes are kept: only an empty result is skipped.
  */
-export function chunkNote(note: NoteDetails): InternalChunkRecord[] {
-  // Quick check - skip notes with mostly encoded content
-  if (!shouldIndexContent(note.content)) {
-    debug(`Note "${note.title}" skipped: contains mostly encoded/binary content`);
-    return [];
+export function prepareNote(note: NoteDetails): PreparedNote | null {
+  if (!note.content.trim()) {
+    return null;
   }
 
-  // Filter content to remove Base64 blocks and redact secrets
   const filterResult = filterContent(note.content);
-
-  if (filterResult.action === "skip") {
+  if (filterResult.action === "skip" || !filterResult.cleanedContent) {
     debug(`Note "${note.title}" skipped: ${filterResult.reasons.join(", ")}`);
-    return [];
+    return null;
   }
-
-  const contentToChunk = filterResult.cleanedContent || note.content;
-
   if (filterResult.action === "filter") {
     debug(`Note "${note.title}" filtered: ${filterResult.reasons.join(", ")}`);
   }
 
-  // Extract metadata from the ORIGINAL content (tags/links should be preserved)
+  // Tags and links come from the original content so filtering cannot drop them.
   const { tags, outlinks } = extractMetadata(note.content);
 
-  // Chunk the filtered content
-  const chunks = chunkText(contentToChunk, {
+  return { note, text: filterResult.cleanedContent, tags, outlinks };
+}
+
+/**
+ * Split a prepared note into chunk rows (without vectors).
+ */
+export function chunkNote(prepared: PreparedNote): UnembeddedChunk[] {
+  const { note, tags, outlinks } = prepared;
+  const pieces = chunkText(prepared.text, {
     chunkSize: DEFAULT_CHUNK_SIZE,
     overlap: DEFAULT_CHUNK_OVERLAP,
   });
 
-  // Return empty array for empty notes (chunkText handles this)
-  if (chunks.length === 0) {
-    debug(`Note "${note.title}" has no content to chunk`);
-    return [];
-  }
+  debug(`Note "${note.title}" chunked into ${pieces.length} chunks`);
 
-  debug(`Note "${note.title}" chunked into ${chunks.length} chunks`);
-
-  // Convert to ChunkRecord format
-  return chunks.map((chunk) => ({
+  return pieces.map((chunk) => ({
     chunk_id: `${note.id}_chunk_${chunk.index}`,
     note_id: note.id,
     note_title: note.title,
@@ -136,127 +92,11 @@ export function chunkNote(note: NoteDetails): InternalChunkRecord[] {
     chunk_index: chunk.index,
     total_chunks: chunk.totalChunks,
     content: chunk.content,
-    vector: [], // Empty - to be filled during embedding generation
     created: note.created,
     modified: note.modified,
-    indexed_at: "", // Empty - to be set during batch processing
     tags,
     outlinks,
   }));
-}
-
-/**
- * Perform a full chunk index of all notes.
- *
- * Phases:
- * 1. Fetch all notes via getAllNotesWithFallback (with hybrid fallback)
- * 2. Chunk all notes using chunkNote
- * 3. Generate embeddings in batch using getEmbeddingBatch
- * 4. Combine chunks with vectors and set indexed_at
- * 5. Store via getChunkStore().indexChunks()
- *
- * @returns ChunkIndexResult with stats
- */
-export async function fullChunkIndex(options: IndexRunOptions = {}): Promise<ChunkIndexResult> {
-  const startTime = Date.now();
-  throwIfCancelled(options.signal);
-  emitProgress(options, "fetch", 0, 1, "Fetching notes for chunk index");
-
-  // Phase 1: Fetch all notes with hybrid fallback
-  debug("Phase 1: Fetching all notes with fallback...");
-  const { notes, skipped: skippedNotes } = await getAllNotesWithFallback({ signal: options.signal, onBatch: (fetched) => emitProgress(options, 'fetch', fetched, Math.max(fetched, 1), `Fetched ${fetched} notes...`) });
-  debug(`Fetched ${notes.length} notes, skipped ${skippedNotes.length}`);
-  emitProgress(options, "fetch", 1, 1, `Fetched ${notes.length} notes`);
-  throwIfCancelled(options.signal);
-
-  if (notes.length === 0) {
-    return {
-      totalNotes: 0,
-      totalChunks: 0,
-      indexed: 0,
-      timeMs: Date.now() - startTime,
-      skippedNotes: skippedNotes.length > 0 ? skippedNotes : undefined,
-    };
-  }
-
-  // Phase 2: Chunk all notes
-  debug("Phase 2: Chunking all notes...");
-  const allChunks: InternalChunkRecord[] = [];
-  for (const note of notes) {
-    throwIfCancelled(options.signal);
-    const noteChunks = chunkNote(note);
-    allChunks.push(...noteChunks);
-  }
-  debug(`Created ${allChunks.length} chunks from ${notes.length} notes`);
-  emitProgress(options, "prepare", allChunks.length, Math.max(notes.length, 1), "Prepared note chunks");
-  throwIfCancelled(options.signal);
-
-  if (allChunks.length === 0) {
-    return {
-      totalNotes: notes.length,
-      totalChunks: 0,
-      indexed: 0,
-      timeMs: Date.now() - startTime,
-    };
-  }
-
-  // Phase 3: Generate embeddings in batch
-  debug("Phase 3: Generating embeddings...");
-  const chunkBatches = chunks(allChunks, getEmbeddingBatchSize());
-  const vectors: number[][] = [];
-  for (let batchIdx = 0; batchIdx < chunkBatches.length; batchIdx++) {
-    throwIfCancelled(options.signal);
-    emitProgress(
-      options,
-      "embed",
-      batchIdx,
-      chunkBatches.length,
-      `Embedding chunk batch ${batchIdx + 1}/${chunkBatches.length}`
-    );
-
-    const batchTexts = chunkBatches[batchIdx].map((chunk) => chunk.content);
-    const batchVectors = await getEmbeddingBatch(batchTexts);
-    vectors.push(...batchVectors);
-
-    emitProgress(
-      options,
-      "embed",
-      batchIdx + 1,
-      chunkBatches.length,
-      `Embedded chunk batch ${batchIdx + 1}/${chunkBatches.length}`
-    );
-  }
-  debug(`Generated ${vectors.length} embeddings`);
-  throwIfCancelled(options.signal);
-
-  // Phase 4: Combine chunks with vectors and set indexed_at
-  debug("Phase 4: Combining chunks with vectors...");
-  const indexedAt = new Date().toISOString();
-  const completeChunks: ChunkRecord[] = allChunks.map((chunk, i) => ({
-    ...chunk,
-    vector: vectors[i],
-    indexed_at: indexedAt,
-  }));
-
-  // Phase 5: Store in LanceDB
-  debug("Phase 5: Storing chunks...");
-  const chunkStore = getChunkStore();
-  emitProgress(options, "persist", 0, 1, "Storing chunk vectors");
-  await chunkStore.indexChunks(completeChunks);
-  emitProgress(options, "persist", 1, 1, "Stored chunk vectors");
-  debug(`Stored ${completeChunks.length} chunks`);
-
-  const timeMs = Date.now() - startTime;
-  debug(`Chunk indexing completed in ${timeMs}ms`);
-  emitProgress(options, "done", 1, 1, "Chunk index completed");
-
-  return {
-    totalNotes: notes.length,
-    totalChunks: allChunks.length,
-    indexed: completeChunks.length,
-    timeMs,
-    skippedNotes: skippedNotes.length > 0 ? skippedNotes : undefined,
-  };
 }
 
 /**
@@ -265,59 +105,5 @@ export async function fullChunkIndex(options: IndexRunOptions = {}): Promise<Chu
  * @returns true if chunk index has records, false otherwise
  */
 export async function hasChunkIndex(): Promise<boolean> {
-  try {
-    const chunkStore = getChunkStore();
-    const count = await chunkStore.count();
-    return count > 0;
-  } catch {
-    // Table doesn't exist or error - no index
-    return false;
-  }
-}
-
-/**
- * Update chunks for specific notes (used by smart refresh).
- * Deletes old chunks for these notes and creates new ones.
- *
- * @param notes - Notes to update chunks for
- * @returns Number of chunks created
- */
-export async function updateChunksForNotes(notes: NoteDetails[]): Promise<number> {
-  if (notes.length === 0) return 0;
-
-  debug(`Updating chunks for ${notes.length} notes...`);
-
-  // Chunk all notes
-  const allChunks: InternalChunkRecord[] = [];
-  for (const note of notes) {
-    const noteChunks = chunkNote(note);
-    allChunks.push(...noteChunks);
-  }
-
-  if (allChunks.length === 0) {
-    debug("No chunks to update");
-    return 0;
-  }
-
-  // Generate embeddings
-  debug(`Generating embeddings for ${allChunks.length} chunks...`);
-  const chunkTexts = allChunks.map((chunk) => chunk.content);
-  const vectors = await getEmbeddingBatch(chunkTexts);
-
-  // Combine with vectors
-  const indexedAt = new Date().toISOString();
-  const completeChunks: ChunkRecord[] = allChunks.map((chunk, i) => ({
-    ...chunk,
-    vector: vectors[i],
-    indexed_at: indexedAt,
-  }));
-
-  // Delete old chunks for these notes and add new ones
-  const chunkStore = getChunkStore();
-  const noteIds = notes.map((n) => n.id);
-  await chunkStore.deleteChunksByNoteIds(noteIds);
-  await chunkStore.addChunks(completeChunks);
-
-  debug(`Updated ${completeChunks.length} chunks for ${notes.length} notes`);
-  return completeChunks.length;
+  return (await getChunkStore().count()) > 0;
 }
