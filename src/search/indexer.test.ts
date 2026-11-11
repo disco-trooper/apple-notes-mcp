@@ -45,6 +45,11 @@ const db = vi.hoisted(() => {
       const byNote = new Map(this.rows.map((r) => [r.note_id, r.modified]));
       return [...byNote].map(([note_id, modified]) => ({ note_id, modified }));
     }
+    async getContentVectors(noteIds?: string[]) {
+      if (!this.exists) throw new Error("Chunk index not found. Run index-notes first.");
+      const ids = noteIds && new Set(noteIds);
+      return new Map(this.rows.filter((r) => !ids || ids.has(r.note_id)).map((r) => [r.content, r.vector]));
+    }
     async indexChunks(chunks: ChunkRecord[]) {
       this.exists = true;
       this.rows = [...chunks];
@@ -66,14 +71,27 @@ const db = vi.hoisted(() => {
     }
   }
 
-  return { notes: new NotesTable(), chunks: new ChunksTable(), NotesTable, ChunksTable };
+  return {
+    notes: new NotesTable(),
+    chunks: new ChunksTable(),
+    NotesTable,
+    ChunksTable,
+    /** Recorded index model (index-model.json). */
+    model: null as { description: string; dims: number } | null,
+    /** Active embedding provider. */
+    provider: "Test (model, 3 dims)",
+  };
 });
 
 vi.mock("../db/lancedb.js", () => ({
   getVectorStore: () => db.notes,
   getChunkStore: () => db.chunks,
   assertIndexCompatible: vi.fn(),
-  recordIndexModel: vi.fn(),
+  indexModelMatches: async (description: string, dims: number) =>
+    db.model?.description === description && db.model.dims === dims,
+  recordIndexModel: vi.fn(async (description: string, dims: number) => {
+    db.model = { description, dims };
+  }),
 }));
 
 vi.mock("../notes/read.js", () => ({
@@ -82,9 +100,13 @@ vi.mock("../notes/read.js", () => ({
   getNoteByTitle: vi.fn(),
 }));
 
+// Text-dependent vectors so reuse and note means are observable.
 vi.mock("../embeddings/index.js", () => ({
-  getEmbeddingBatch: vi.fn(async (texts: string[]) => texts.map(() => [0.1, 0.2, 0.3])),
-  getProviderDescription: () => "Test (model, 3 dims)",
+  getEmbeddingBatch: vi.fn(async (texts: string[]) =>
+    texts.map((t) => [t.length, t.charCodeAt(0), t.charCodeAt(t.length - 1)])
+  ),
+  getEmbeddingDimensions: () => 3,
+  getProviderDescription: () => db.provider,
 }));
 
 import { indexNotes, reindexNote, syncNotesById } from "./indexer.js";
@@ -104,10 +126,22 @@ function chunkContents(noteId: string): string[] {
   return db.chunks.rows.filter((r) => r.note_id === noteId).map((r) => r.content);
 }
 
+function embeddedTexts(): string[] {
+  return vi.mocked(getEmbeddingBatch).mock.calls.flatMap((c) => c[0]);
+}
+
+function normalizedMean(vectors: number[][]): number[] {
+  const sum = vectors[0].map((_, i) => vectors.reduce((acc, v) => acc + v[i], 0));
+  const norm = Math.hypot(...sum);
+  return sum.map((v) => v / norm);
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   db.notes = new db.NotesTable();
   db.chunks = new db.ChunksTable();
+  db.model = null;
+  db.provider = "Test (model, 3 dims)";
 });
 
 describe("indexNotes full", () => {
@@ -131,6 +165,66 @@ describe("indexNotes full", () => {
     await expect(indexNotes("full", { signal: controller.signal })).rejects.toThrow("Indexing cancelled");
     expect(db.notes.exists).toBe(false);
   });
+
+  it("sets each note vector to the normalized mean of its chunk vectors", async () => {
+    const long = Array.from({ length: 60 }, (_, i) => `Sentence number ${i} about something.`).join(" ");
+    library([makeNote("a", "A", long)]);
+
+    await indexNotes("full");
+
+    const chunkVectors = db.chunks.rows.map((r) => r.vector);
+    expect(chunkVectors.length).toBeGreaterThan(1);
+    const noteVector = db.notes.rows.get("a")?.vector ?? [];
+    normalizedMean(chunkVectors).forEach((v, i) => expect(noteVector[i]).toBeCloseTo(v, 10));
+  });
+
+  it("reuses stored vectors when reindexing with the same model", async () => {
+    library([makeNote("a", "A", "alpha"), makeNote("b", "B", "beta")]);
+    await indexNotes("full");
+    const before = db.chunks.rows.map((r) => r.vector);
+
+    vi.mocked(getEmbeddingBatch).mockClear();
+    const result = await indexNotes("full");
+
+    expect(getEmbeddingBatch).not.toHaveBeenCalled();
+    expect(db.chunks.rows.map((r) => r.vector)).toEqual(before);
+    expect(result).toMatchObject({ embedded: 0, reused: 2, chunks: 2 });
+  });
+
+  it("embeds only chunks whose text changed", async () => {
+    library([makeNote("a", "A", "alpha"), makeNote("b", "B", "beta")]);
+    await indexNotes("full");
+
+    library([makeNote("a", "A", "alpha v2", "2026-02-01T00:00:00Z"), makeNote("b", "B", "beta")]);
+    vi.mocked(getEmbeddingBatch).mockClear();
+    const result = await indexNotes("full");
+
+    expect(embeddedTexts()).toEqual(["alpha v2"]);
+    expect(result).toMatchObject({ embedded: 1, reused: 1 });
+  });
+
+  it("embeds everything when the embedding model changed", async () => {
+    library([makeNote("a", "A", "alpha"), makeNote("b", "B", "beta")]);
+    await indexNotes("full");
+
+    db.provider = "Other (model, 3 dims)";
+    vi.mocked(getEmbeddingBatch).mockClear();
+    const result = await indexNotes("full");
+
+    expect(embeddedTexts().sort()).toEqual(["alpha", "beta"]);
+    expect(result).toMatchObject({ embedded: 2, reused: 0 });
+  });
+
+  it("embeds everything when no model was recorded", async () => {
+    library([makeNote("a", "A", "alpha")]);
+    await indexNotes("full");
+    db.model = null;
+
+    vi.mocked(getEmbeddingBatch).mockClear();
+    await indexNotes("full");
+
+    expect(embeddedTexts()).toEqual(["alpha"]);
+  });
 });
 
 describe("indexNotes incremental", () => {
@@ -145,8 +239,8 @@ describe("indexNotes incremental", () => {
     expect(chunkContents("a")).toEqual(["new text"]);
     expect(db.notes.rows.get("a")?.content).toBe("new text");
     expect(result.breakdown).toEqual({ added: 0, updated: 1, deleted: 0, skipped: 1 });
-    // Only the changed note is embedded (once for the notes table, once per chunk).
-    expect(vi.mocked(getEmbeddingBatch).mock.calls.flatMap((c) => c[0])).toEqual(["new text", "new text"]);
+    // Only the changed chunk is embedded; the note vector is derived from it.
+    expect(embeddedTexts()).toEqual(["new text"]);
   });
 
   it("removes deleted notes from both tables in a deletion-only run", async () => {
@@ -206,6 +300,20 @@ describe("indexNotes incremental", () => {
 
     expect(db.notes.rows.has("b")).toBe(true);
     expect(chunkContents("b")).toEqual(["beta"]);
+  });
+
+  it("rebuilds a missing notes table from reused chunk vectors", async () => {
+    library([makeNote("a", "A", "alpha"), makeNote("b", "B", "beta")]);
+    await indexNotes("full");
+    await db.notes.clear();
+
+    vi.mocked(getEmbeddingBatch).mockClear();
+    const result = await indexNotes("incremental");
+
+    expect(getEmbeddingBatch).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ indexed: 2, chunks: 0, embedded: 0, reused: 2 });
+    const chunkVector = db.chunks.rows.find((r) => r.note_id === "a")?.vector ?? [];
+    expect(db.notes.rows.get("a")?.vector).toEqual(normalizedMean([chunkVector]));
   });
 
   it("builds a missing chunk table from an existing notes table", async () => {

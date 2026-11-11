@@ -128,6 +128,9 @@ function formatIndexResult(result: IndexResult): string {
   if (result.chunks !== undefined) {
     message += `\nChunks written: ${result.chunks}`;
   }
+  if (result.embedded !== undefined) {
+    message += `\nEmbedded ${result.embedded} chunks (reused ${result.reused ?? 0})`;
+  }
   if (result.skippedNotes && result.skippedNotes.length > 0) {
     message += `\n\nSkipped notes (could not read - may be locked, syncing, or corrupted):\n${result.skippedNotes.map((n) => `  - ${n}`).join("\n")}`;
     message += "\nTip: Check these notes in Apple Notes app. Locked notes can be unlocked, syncing notes will be available after sync completes.";

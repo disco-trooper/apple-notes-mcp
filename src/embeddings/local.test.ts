@@ -69,6 +69,22 @@ describe("local embeddings", () => {
     });
   });
 
+  describe("getLocalEmbeddingBatch", () => {
+    it("runs the pipeline in sub-batches of 8 and keeps input order", async () => {
+      const echo = async (input: string | string[]) => {
+        const inputs = Array.isArray(input) ? input : [input];
+        return { tolist: () => inputs.map((t) => [Number(t.replace("passage: ", ""))]) };
+      };
+      pipe.mockImplementationOnce(echo).mockImplementationOnce(echo).mockImplementationOnce(echo);
+      const texts = Array.from({ length: 20 }, (_, i) => String(i));
+
+      const vectors = await getLocalEmbeddingBatch(texts);
+
+      expect(pipe.mock.calls.map((call) => (call[0] as string[]).length)).toEqual([8, 8, 4]);
+      expect(vectors).toEqual(texts.map((t) => [Number(t)]));
+    });
+  });
+
   describe("getLocalEmbedding", () => {
     it("should throw on empty text", async () => {
       await expect(getLocalEmbedding("")).rejects.toThrow("non-empty string");

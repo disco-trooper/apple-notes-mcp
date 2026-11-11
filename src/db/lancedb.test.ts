@@ -7,6 +7,7 @@ import {
   LanceDBStore,
   ChunkStore,
   assertIndexCompatible,
+  indexModelMatches,
   chunkSchema,
   recordIndexModel,
 } from "./lancedb.js";
@@ -239,6 +240,22 @@ describe("ChunkStore", () => {
     ]);
   });
 
+  it("getContentVectors maps chunk content to its stored vector, optionally per note", async () => {
+    await chunkStore.indexChunks([
+      chunk("n1", 0, { vector: Array(8).fill(0.5) }),
+      chunk("n2", 0, { vector: Array(8).fill(0.25) }),
+    ]);
+
+    expect(await chunkStore.getContentVectors()).toEqual(
+      new Map([
+        ["Chunk 0 of n1", Array(8).fill(0.5)],
+        ["Chunk 0 of n2", Array(8).fill(0.25)],
+      ])
+    );
+    expect([...(await chunkStore.getContentVectors(["n2"])).keys()]).toEqual(["Chunk 0 of n2"]);
+    expect((await chunkStore.getContentVectors([])).size).toBe(0);
+  });
+
   it("searchChunks returns chunk rows with note ids and numeric indexes", async () => {
     await chunkStore.indexChunks([chunk("n1", 0), chunk("n1", 1)]);
     const results = await chunkStore.searchChunks(Array(8).fill(0.1), 2);
@@ -277,6 +294,16 @@ describe("embedding model guard", () => {
       "Embedding model changed (Local (e5), 384 dims -> OpenRouter (qwen), 4096 dims). Run purge-index, then index-notes mode=full."
     );
     await expect(assertIndexCompatible("Local (e5)", 1024, testDbPath)).rejects.toThrow("Embedding model changed");
+  });
+
+  it("indexModelMatches only for an exact recorded match", async () => {
+    expect(await indexModelMatches("Local (e5)", 384, testDbPath)).toBe(false);
+
+    await recordIndexModel("Local (e5)", 384, testDbPath);
+
+    expect(await indexModelMatches("Local (e5)", 384, testDbPath)).toBe(true);
+    expect(await indexModelMatches("Local (e5)", 1024, testDbPath)).toBe(false);
+    expect(await indexModelMatches("OpenRouter (qwen)", 384, testDbPath)).toBe(false);
   });
 
   it("clear (purge) removes the record", async () => {

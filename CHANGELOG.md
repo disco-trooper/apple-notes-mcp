@@ -47,6 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** Apple Silicon Mac required. Upgraded `@lancedb/lancedb` to 0.41, which ships no native binaries for Intel (x64) Macs (the last darwin-x64 build was 0.22.x)
 - Keyword search index stores token positions, so quoted phrases match as phrases. No stemming or stop-word removal; accents are folded (`prilis` matches `příliš`). Indexes written by 1.9.0 still open; the keyword index is rebuilt on the next index run
 - Upgraded `@modelcontextprotocol/sdk` to 1.32
+- Faster indexing: only chunks are embedded (a note's vector is the normalized mean of its chunk vectors), chunk vectors stored by the same embedding model are reused for unchanged chunk text in both full and incremental runs, and the local model embeds in pipeline batches of 8. `index-notes` reports embedded and reused chunk counts
 
 ### Fixed
 

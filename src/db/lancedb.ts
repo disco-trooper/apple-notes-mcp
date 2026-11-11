@@ -89,7 +89,17 @@ export interface ChunkRow {
 const debug = createDebugLogger("DB");
 
 /** Max ids per `IN (...)` predicate. */
-const DELETE_BATCH_SIZE = 500;
+const IN_BATCH_SIZE = 500;
+
+/** `column IN (...)` predicates covering `values`, at most IN_BATCH_SIZE values each. */
+function inPredicates(column: string, values: string[]): string[] {
+  const predicates: string[] = [];
+  for (let i = 0; i < values.length; i += IN_BATCH_SIZE) {
+    const list = values.slice(i, i + IN_BATCH_SIZE).map((v) => `'${escapeForFilter(v)}'`).join(", ");
+    predicates.push(`${column} IN (${list})`);
+  }
+  return predicates;
+}
 
 const MODEL_FILE = "index-model.json";
 
@@ -233,6 +243,18 @@ export async function recordIndexModel(
   await fs.writeFile(modelFilePath(dataDir), JSON.stringify(info), "utf8");
 }
 
+/** The recorded index model, or null when none was recorded (empty or pre-guard index). */
+async function readIndexModel(dataDir: string): Promise<IndexModelInfo | null> {
+  let raw: string;
+  try {
+    raw = await fs.readFile(modelFilePath(dataDir), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  return JSON.parse(raw) as IndexModelInfo;
+}
+
 /**
  * Throw when the active embedding model differs from the one the index was
  * built with. No-op when no record exists (empty or pre-guard index).
@@ -242,20 +264,26 @@ export async function assertIndexCompatible(
   dims: number,
   dataDir: string = getDataDir()
 ): Promise<void> {
-  let raw: string;
-  try {
-    raw = await fs.readFile(modelFilePath(dataDir), "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-    throw error;
-  }
-  const stored = JSON.parse(raw) as IndexModelInfo;
-  if (stored.provider !== description || stored.dims !== dims) {
+  const stored = await readIndexModel(dataDir);
+  if (stored && (stored.provider !== description || stored.dims !== dims)) {
     throw new Error(
       `Embedding model changed (${stored.provider}, ${stored.dims} dims -> ${description}, ${dims} dims). ` +
         "Run purge-index, then index-notes mode=full."
     );
   }
+}
+
+/**
+ * True only when a model record exists and matches exactly, i.e. stored
+ * vectors come from the active model and can be reused.
+ */
+export async function indexModelMatches(
+  description: string,
+  dims: number,
+  dataDir: string = getDataDir()
+): Promise<boolean> {
+  const stored = await readIndexModel(dataDir);
+  return stored !== null && stored.provider === description && stored.dims === dims;
 }
 
 // ---------------------------------------------------------------------------
@@ -333,9 +361,8 @@ abstract class LanceTable {
   protected async deleteWhereIn(column: string, values: string[]): Promise<void> {
     if (values.length === 0) return;
     const table = await this.ensureTable();
-    for (let i = 0; i < values.length; i += DELETE_BATCH_SIZE) {
-      const list = values.slice(i, i + DELETE_BATCH_SIZE).map((v) => `'${escapeForFilter(v)}'`).join(", ");
-      await table.delete(`${column} IN (${list})`);
+    for (const predicate of inPredicates(column, values)) {
+      await table.delete(predicate);
     }
     debug(`${this.tableName}: deleted rows for ${values.length} ${column} values`);
   }
@@ -522,6 +549,25 @@ export class ChunkStore extends LanceTable {
       if (!byNote.has(noteId)) byNote.set(noteId, row.modified as string);
     }
     return Array.from(byNote, ([note_id, modified]) => ({ note_id, modified }));
+  }
+
+  /**
+   * Stored vector per distinct chunk content, for embedding reuse. Reads only
+   * the `content` and `vector` columns; `noteIds` limits the read to those notes.
+   */
+  async getContentVectors(noteIds?: string[]): Promise<Map<string, number[]>> {
+    const vectors = new Map<string, number[]>();
+    if (noteIds?.length === 0) return vectors;
+    const table = await this.ensureTable();
+    const filters = noteIds ? inPredicates("note_id", noteIds) : [undefined];
+    for (const filter of filters) {
+      const query = table.query().select(["content", "vector"]);
+      const rows = await (filter ? query.where(filter) : query).toArray();
+      for (const row of rows) {
+        vectors.set(row.content as string, toArray<number>(row.vector));
+      }
+    }
+    return vectors;
   }
 
   async searchChunks(queryVector: number[], limit: number): Promise<ChunkRow[]> {

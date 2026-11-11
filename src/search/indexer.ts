@@ -8,13 +8,18 @@
  * fetch of the library. Rows are keyed by the Apple Notes id; a note is
  * rewritten when its `modified` differs from the stored `modified`.
  * Every write runs under the in-process index lock.
+ *
+ * Only chunks are embedded. A note's vector is the normalized mean of its
+ * chunk vectors, and chunk vectors stored by the same model are reused for
+ * identical chunk text instead of being embedded again.
  */
 
-import { getEmbeddingBatch, getProviderDescription } from "../embeddings/index.js";
+import { getEmbeddingBatch, getEmbeddingDimensions, getProviderDescription } from "../embeddings/index.js";
 import {
   getVectorStore,
   getChunkStore,
   assertIndexCompatible,
+  indexModelMatches,
   recordIndexModel,
   type NoteRecord,
   type ChunkRecord,
@@ -27,7 +32,6 @@ import {
   type NoteDetails,
 } from "../notes/read.js";
 import { createDebugLogger } from "../utils/debug.js";
-import { truncateForEmbedding } from "../utils/text.js";
 import { NoteNotFoundError } from "../errors/index.js";
 import { getEmbeddingBatchSize } from "../config/constants.js";
 import {
@@ -61,6 +65,10 @@ export interface IndexResult {
   skippedNotes?: string[];
   /** Chunk rows written to the chunks table */
   chunks?: number;
+  /** Chunk texts sent to the embedding provider */
+  embedded?: number;
+  /** Chunks whose stored vector was reused (identical text, same model) */
+  reused?: number;
 }
 
 /** Changes to apply to one table. */
@@ -126,6 +134,30 @@ function toNoteRecord(prepared: PreparedNote, vector: number[], indexedAt: strin
   };
 }
 
+/** A note ready to write: its prepared content and (non-empty) chunks. */
+interface ChunkedNote {
+  prepared: PreparedNote;
+  chunks: UnembeddedChunk[];
+}
+
+/** Prepare and chunk a note; null when nothing indexable remains. */
+function chunkForIndex(note: NoteDetails): ChunkedNote | null {
+  const prepared = prepareNote(note);
+  if (!prepared) return null;
+  const chunks = chunkNote(prepared);
+  return chunks.length > 0 ? { prepared, chunks } : null;
+}
+
+/** L2-normalized mean of equal-length vectors. */
+function meanVector(vectors: number[][]): number[] {
+  const mean = new Array<number>(vectors[0].length).fill(0);
+  for (const vector of vectors) {
+    for (let i = 0; i < mean.length; i++) mean[i] += vector[i];
+  }
+  const norm = Math.hypot(...mean);
+  return norm === 0 ? mean : mean.map((v) => v / norm);
+}
+
 /** Embed texts in provider-sized batches. */
 async function embedAll(texts: string[], options: IndexRunOptions = {}): Promise<number[][]> {
   const batchSize = getEmbeddingBatchSize();
@@ -141,6 +173,72 @@ async function embedAll(texts: string[], options: IndexRunOptions = {}): Promise
   emitProgress(options, "embed", batchCount, batchCount, `Embedded ${texts.length} texts`);
 
   return vectors;
+}
+
+interface ChunkVectors {
+  /** Vector per chunk content. */
+  byContent: Map<string, number[]>;
+  /** Distinct texts sent to the embedding provider. */
+  embedded: number;
+  /** Chunks whose stored vector was reused. */
+  reused: number;
+}
+
+/**
+ * Vectors for every chunk content: stored vectors are reused for identical
+ * text when the index was built with the active model, the rest is embedded.
+ * Chunk `content` is exactly the text that gets embedded (the provider adds
+ * any role prefix), so it is a sound reuse key.
+ */
+async function resolveChunkVectors(
+  chunks: UnembeddedChunk[],
+  loadStored: () => Promise<Map<string, number[]>>,
+  options: IndexRunOptions = {}
+): Promise<ChunkVectors> {
+  if (chunks.length === 0) {
+    return { byContent: new Map(), embedded: 0, reused: 0 };
+  }
+
+  let stored = new Map<string, number[]>();
+  if (await indexModelMatches(getProviderDescription(), getEmbeddingDimensions())) {
+    stored = await loadStored().catch((error: unknown) => {
+      debug("Stored chunk vectors unavailable, embedding everything:", error);
+      return new Map<string, number[]>();
+    });
+  }
+
+  const byContent = new Map<string, number[]>();
+  const toEmbed = new Set<string>();
+  let reused = 0;
+  for (const { content } of chunks) {
+    const vector = stored.get(content);
+    if (vector) {
+      byContent.set(content, vector);
+      reused++;
+    } else {
+      toEmbed.add(content);
+    }
+  }
+
+  const texts = [...toEmbed];
+  const vectors = await embedAll(texts, options);
+  texts.forEach((text, i) => byContent.set(text, vectors[i]));
+  debug(`Chunk vectors: embedded ${texts.length}, reused ${reused} of ${chunks.length} chunks`);
+
+  return { byContent, embedded: texts.length, reused };
+}
+
+/** Note row whose vector is the normalized mean of its chunk vectors. */
+function noteRecordFor(note: ChunkedNote, byContent: Map<string, number[]>, indexedAt: string): NoteRecord {
+  const vectors = note.chunks.map((c) => byContent.get(c.content) as number[]);
+  return toNoteRecord(note.prepared, meanVector(vectors), indexedAt);
+}
+
+/** Chunk rows with their resolved vectors. */
+function chunkRecordsFor(notes: ChunkedNote[], byContent: Map<string, number[]>, indexedAt: string): ChunkRecord[] {
+  return notes.flatMap((n) =>
+    n.chunks.map((c): ChunkRecord => ({ ...c, vector: byContent.get(c.content) as number[], indexed_at: indexedAt }))
+  );
 }
 
 /**
@@ -199,37 +297,30 @@ async function runIndex(
   emitProgress(options, "fetch", 1, 1, `Fetched ${notes.length} notes`);
   throwIfCancelled(options.signal);
 
-  // Phase 2: diff each table and prepare content (once per note).
+  // Phase 2: diff each table, then prepare and chunk each note either table rewrites.
   const keep = idsOfSkippedNotes(noteMetadata, skipped);
   const notesPlan = planTable(noteModified, notes, keep);
   const chunksPlan = planTable(chunkMetadata, notes, keep);
 
-  const preparedById = new Map<string, PreparedNote | null>();
-  const prepare = (note: NoteDetails): PreparedNote | null => {
-    if (!preparedById.has(note.id)) {
-      preparedById.set(note.id, prepareNote(note));
-    }
-    return preparedById.get(note.id) ?? null;
-  };
+  // Note vectors are derived from chunk vectors, so note rows need chunks too.
+  const chunked = new Map<string, ChunkedNote | null>();
+  for (const note of [...notesPlan.write, ...chunksPlan.write]) {
+    if (!chunked.has(note.id)) chunked.set(note.id, chunkForIndex(note));
+  }
 
-  const notesToEmbed: PreparedNote[] = [];
+  const noteWrites: ChunkedNote[] = [];
   for (const note of notesPlan.write) {
-    const prepared = prepare(note);
-    if (prepared) {
-      notesToEmbed.push(prepared);
+    const entry = chunked.get(note.id);
+    if (entry) {
+      noteWrites.push(entry);
     } else if (noteModified?.has(note.id)) {
       // Content became empty/unindexable: drop the old row.
       notesPlan.remove.push(note.id);
     }
   }
-
-  const chunksToEmbed: UnembeddedChunk[] = [];
-  for (const note of chunksPlan.write) {
-    const prepared = prepare(note);
-    if (prepared) {
-      chunksToEmbed.push(...chunkNote(prepared));
-    }
-  }
+  const chunkWrites = chunksPlan.write
+    .map((note) => chunked.get(note.id))
+    .filter((entry): entry is ChunkedNote => entry != null);
   // Rewritten notes lose their old chunks even when they now produce none.
   const chunkRemove = chunksPlan.rebuild
     ? []
@@ -237,43 +328,38 @@ async function runIndex(
         ...chunksPlan.remove,
         ...chunksPlan.write.map((n) => n.id).filter((id) => chunkMetadata?.has(id)),
       ];
+  const allChunks = [...chunked.values()].flatMap((entry) => entry?.chunks ?? []);
 
   debug(
-    `Plan: notes ${notesPlan.rebuild ? "rebuild" : "update"} write=${notesToEmbed.length} remove=${notesPlan.remove.length}; ` +
-      `chunks ${chunksPlan.rebuild ? "rebuild" : "update"} write=${chunksToEmbed.length} remove=${chunkRemove.length}`
+    `Plan: notes ${notesPlan.rebuild ? "rebuild" : "update"} write=${noteWrites.length} remove=${notesPlan.remove.length}; ` +
+      `chunks ${chunksPlan.rebuild ? "rebuild" : "update"} write=${chunkWrites.length} notes remove=${chunkRemove.length}; ` +
+      `${allChunks.length} chunks need vectors`
   );
-  emitProgress(
-    options,
-    "prepare",
-    notesToEmbed.length + chunksToEmbed.length,
-    notes.length,
-    "Prepared notes and chunks"
-  );
+  emitProgress(options, "prepare", chunked.size, notes.length, "Prepared notes and chunks");
 
-  // Phase 3: embed everything before touching either table.
-  const vectors = await embedAll(
-    [
-      ...notesToEmbed.map((p) => truncateForEmbedding(p.text)),
-      ...chunksToEmbed.map((c) => c.content),
-    ],
+  // Phase 3: resolve every vector before touching either table. Full mode reads
+  // the stored vectors here, before the overwrite; incremental mode only reads
+  // the rows of the notes being rewritten.
+  const { byContent, embedded, reused } = await resolveChunkVectors(
+    allChunks,
+    () =>
+      mode === "full"
+        ? chunkStore.getContentVectors()
+        : chunkStore.getContentVectors([...chunked.keys()].filter((id) => chunkMetadata?.has(id))),
     options
   );
   throwIfCancelled(options.signal);
 
   const description = getProviderDescription();
-  const dims = vectors[0]?.length;
+  const dims = byContent.values().next().value?.length;
   if (mode === "incremental" && dims !== undefined) {
     await assertIndexCompatible(description, dims);
   }
 
   // Phase 4: write. Not cancellable once started, so both tables stay consistent.
   const indexedAt = new Date().toISOString();
-  const noteRecords = notesToEmbed.map((p, i) => toNoteRecord(p, vectors[i], indexedAt));
-  const chunkRecords: ChunkRecord[] = chunksToEmbed.map((c, i) => ({
-    ...c,
-    vector: vectors[notesToEmbed.length + i],
-    indexed_at: indexedAt,
-  }));
+  const noteRecords = noteWrites.map((entry) => noteRecordFor(entry, byContent, indexedAt));
+  const chunkRecords = chunkRecordsFor(chunkWrites, byContent, indexedAt);
 
   emitProgress(options, "persist", 0, 2, "Writing notes table");
   if (notesPlan.rebuild) {
@@ -315,7 +401,10 @@ async function runIndex(
   }
 
   const timeMs = Date.now() - startTime;
-  debug(`${mode} index complete: ${noteRecords.length} notes, ${chunkRecords.length} chunks, ${timeMs}ms`);
+  debug(
+    `${mode} index complete: ${noteRecords.length} notes, ${chunkRecords.length} chunks ` +
+      `(embedded ${embedded}, reused ${reused}), ${timeMs}ms`
+  );
   emitProgress(options, "done", 1, 1, `${mode === "full" ? "Full" : "Incremental"} index completed`);
 
   const added = noteRecords.filter((r) => !noteModified?.has(r.id)).length;
@@ -334,6 +423,8 @@ async function runIndex(
         : undefined,
     skippedNotes: skipped.length > 0 ? skipped : undefined,
     chunks: chunkRecords.length,
+    embedded,
+    reused,
   };
 }
 
@@ -365,35 +456,37 @@ async function writeNotes(notes: NoteDetails[], removeIds: string[]): Promise<bo
     return false;
   }
 
-  const indexable: PreparedNote[] = [];
+  const writes: ChunkedNote[] = [];
   const unindexableIds: string[] = [];
   for (const note of notes) {
-    const prepared = prepareNote(note);
-    if (prepared) {
-      indexable.push(prepared);
+    const entry = chunkForIndex(note);
+    if (entry) {
+      writes.push(entry);
     } else {
       unindexableIds.push(note.id);
     }
   }
 
-  const noteTexts = hasNotes ? indexable.map((p) => truncateForEmbedding(p.text)) : [];
-  const chunks = hasChunks ? indexable.flatMap((p) => chunkNote(p)) : [];
-  const vectors = await embedAll([...noteTexts, ...chunks.map((c) => c.content)]);
-  if (vectors.length > 0) {
-    await assertIndexCompatible(getProviderDescription(), vectors[0].length);
+  // Read stored vectors before the old chunks are deleted below.
+  const { byContent } = await resolveChunkVectors(
+    writes.flatMap((entry) => entry.chunks),
+    async () =>
+      hasChunks ? chunkStore.getContentVectors(writes.map((entry) => entry.prepared.note.id)) : new Map()
+  );
+  const dims = byContent.values().next().value?.length;
+  if (dims !== undefined) {
+    await assertIndexCompatible(getProviderDescription(), dims);
   }
 
   const indexedAt = new Date().toISOString();
   if (hasNotes) {
-    await noteStore.upsert(noteTexts.map((_, i) => toNoteRecord(indexable[i], vectors[i], indexedAt)));
+    await noteStore.upsert(writes.map((entry) => noteRecordFor(entry, byContent, indexedAt)));
     await noteStore.deleteByIds([...unindexableIds, ...removeIds]);
     await noteStore.rebuildFtsIndex();
   }
   if (hasChunks) {
     await chunkStore.deleteChunksByNoteIds([...notes.map((n) => n.id), ...removeIds]);
-    await chunkStore.addChunks(
-      chunks.map((c, i): ChunkRecord => ({ ...c, vector: vectors[noteTexts.length + i], indexed_at: indexedAt }))
-    );
+    await chunkStore.addChunks(chunkRecordsFor(writes, byContent, indexedAt));
     await chunkStore.rebuildFtsIndex();
   }
   return true;
