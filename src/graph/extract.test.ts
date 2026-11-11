@@ -1,6 +1,6 @@
 // src/graph/extract.test.ts
 import { describe, it, expect } from "vitest";
-import { extractTags, extractOutlinks, extractMetadata } from "./extract.js";
+import { extractTags, extractOutlinks, extractMetadata, resolveLink } from "./extract.js";
 import { htmlToMarkdown } from "../notes/conversion.js";
 
 describe("extractTags", () => {
@@ -68,6 +68,16 @@ describe("extractTags", () => {
     expect(extractTags("#todo- next")).toEqual(["todo"]);
   });
 
+  it("reads tags inside Turndown italics", () => {
+    expect(extractTags("_#idea_")).toEqual(["idea"]);
+    expect(extractTags("_about #idea_")).toEqual(["idea"]);
+    expect(extractTags(htmlToMarkdown("<div><i>#idea</i></div>"))).toEqual(["idea"]);
+  });
+
+  it("still ignores a hash after an intraword underscore", () => {
+    expect(extractTags("foo_#bar")).toEqual([]);
+  });
+
   it("keeps tags that contain letters mixed with numbers", () => {
     const content = "#project1 #2024goals #abc123xyz";
     expect(extractTags(content)).toEqual(["project1", "2024goals", "abc123xyz"]);
@@ -104,8 +114,32 @@ describe("extractOutlinks", () => {
     expect(extractOutlinks(content)).toEqual(["Link"]);
   });
 
-  it("resolves aliases and heading anchors to the note title", () => {
-    expect(extractOutlinks("[[Title|alias]] [[Other#Heading]] [[Title]]")).toEqual(["Title", "Other"]);
+  it("strips aliases but keeps # targets for lookup", () => {
+    expect(extractOutlinks("[[Title|alias]] [[Other#Heading]] [[C# cheatsheet]] [[Title]]")).toEqual([
+      "Title",
+      "Other#Heading",
+      "C# cheatsheet",
+    ]);
+  });
+});
+
+describe("resolveLink", () => {
+  const byTitle = new Map([
+    ["c# cheatsheet", "cs"],
+    ["c", "c-note"],
+    ["note", "n"],
+  ]);
+
+  it("prefers the full title over the part before #", () => {
+    expect(resolveLink("C# cheatsheet", byTitle)).toBe("cs");
+  });
+
+  it("falls back to the title before # for heading anchors", () => {
+    expect(resolveLink("Note#h", byTitle)).toBe("n");
+  });
+
+  it("returns undefined when neither form matches", () => {
+    expect(resolveLink("Missing#h", byTitle)).toBeUndefined();
   });
 });
 
@@ -128,5 +162,11 @@ describe("extractMetadata on htmlToMarkdown output", () => {
       tags: ["my_tag", "práce"],
       outlinks: ["Meeting Notes", "Plan"],
     });
+  });
+
+  it("keeps a wiki link followed by ( escaped, so it is not an outlink", () => {
+    const markdown = htmlToMarkdown("<div>[[x]](u) and [[y]]</div>");
+    expect(markdown).toBe("\\[\\[x\\]\\](u) and [[y]]");
+    expect(extractOutlinks(markdown)).toEqual(["y"]);
   });
 });

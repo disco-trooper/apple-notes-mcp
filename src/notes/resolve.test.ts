@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("./jxa-runner.js", () => ({
   executeJxa: vi.fn(),
@@ -68,6 +68,12 @@ describe("isTrashFolderName", () => {
     ["recently deleted", true],
     ["  RECENTLY DELETED ", true],
     ["Recently Deleted Stuff", false],
+    ["Nedávno smazané", true],
+    ["nedávno smazané", true],
+    ["Nedávno smazané".normalize("NFD"), true],
+    ["Zuletzt gelöscht", true],
+    ["Suppressions récentes", true],
+    ["Nyligt slettet", true],
     ["Notes", false],
   ])("%j -> %s", (name, expected) => {
     expect(isTrashFolderName(name)).toBe(expected);
@@ -89,6 +95,38 @@ describe("findFolder (shared JXA helper)", () => {
 
   it("accepts the Account/Folder form", () => {
     expect(findFolder("On My Mac/Notes")).toBe("On My Mac/Notes");
+  });
+
+  it("never targets a localized trash folder", () => {
+    const czech = fakeNotes({ iCloud: ["Poznámky", "Nedávno smazané"] }, []);
+    const find = (ref: string): unknown =>
+      runScript(`const app = Application(); ${FOLDER_JXA_HELPERS} return findFolder(${JSON.stringify(ref)}, 'Folder').key;`, czech);
+    expect(() => find("Nedávno smazané")).toThrow("Folder not found: Nedávno smazané");
+    expect(find("Poznámky")).toBe("iCloud/Poznámky");
+  });
+});
+
+describe("NOTES_TRASH_FOLDER", () => {
+  afterEach(() => {
+    delete process.env.NOTES_TRASH_FOLDER;
+    vi.resetModules();
+  });
+
+  it("adds an extra trash name for both the TS check and the JXA helper", async () => {
+    process.env.NOTES_TRASH_FOLDER = " Papierkorb ";
+    vi.resetModules();
+    // Dynamic import: the name list is read at module load, so a fresh module is needed.
+    const fresh = await import("./resolve.js");
+
+    expect(fresh.isTrashFolderName("papierkorb")).toBe(true);
+    expect(fresh.isTrashFolderName("Recently Deleted")).toBe(true);
+
+    const library = fakeNotes({ iCloud: ["Notes", "Papierkorb"] }, []);
+    expect(() =>
+      runScript(`const app = Application(); ${fresh.FOLDER_JXA_HELPERS} return findFolder('Papierkorb', 'Folder');`, library)
+    ).toThrow("Folder not found: Papierkorb");
+    // Without the override the folder is a normal one.
+    expect(isTrashFolderName("Papierkorb")).toBe(false);
   });
 });
 

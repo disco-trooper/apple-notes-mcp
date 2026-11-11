@@ -104,6 +104,33 @@ describe("findRelatedNotes", () => {
     expect(result[0]).toMatchObject({ title: "Source", direction: "incoming" });
   });
 
+  it("resolves # in titles before falling back to heading anchors", async () => {
+    useRows([
+      { id: "1", title: "Source", outlinks: ["C# cheatsheet", "Note#h"] },
+      { id: "2", title: "C# cheatsheet" },
+      { id: "3", title: "C" },
+      { id: "4", title: "Note" },
+    ]);
+
+    const result = await findRelatedNotes("1", { types: ["link"] });
+
+    expect(result.map((r) => [r.title, r.direction])).toEqual([
+      ["C# cheatsheet", "outgoing"],
+      ["Note", "outgoing"],
+    ]);
+  });
+
+  it("counts [[Target#heading]] as a backlink", async () => {
+    useRows([
+      { id: "1", title: "Target" },
+      { id: "2", title: "Source", outlinks: ["Target#section"] },
+    ]);
+
+    const result = await findRelatedNotes("1", { types: ["link"] });
+
+    expect(result).toEqual([expect.objectContaining({ title: "Source", direction: "incoming" })]);
+  });
+
   it("does not return the source note when it links to itself", async () => {
     useRows([{ id: "1", title: "Self", outlinks: ["Self"] }]);
     expect(await findRelatedNotes("1", { types: ["link"] })).toEqual([]);

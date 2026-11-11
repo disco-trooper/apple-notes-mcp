@@ -793,3 +793,98 @@ describe("listNotes folder optimization", () => {
     expect(vi.mocked(executeJxa).mock.calls.every(([code]) => !String(code).includes("toLowerCase"))).toBe(true);
   });
 });
+
+describe("listNotes folder references", () => {
+  /** Library layout: flat `app.folders()` order, as Notes reports it. */
+  const folders = [
+    { name: "Notes", account: "On My Mac", path: "Notes" },
+    { name: "Notes", account: "iCloud", path: "Notes" },
+    { name: "Projects", account: "iCloud", path: "Projects" },
+    { name: "Child", account: "iCloud", path: "Projects/Child" },
+    { name: "Child", account: "iCloud", path: "Archive/Child" },
+    { name: "Recently Deleted", account: "iCloud", path: "Recently Deleted" },
+  ];
+
+  /**
+   * Mirror Notes for the folder-reference protocol: enumeration returns
+   * names + counts; the reference-match script is answered with the
+   * folderMatches semantics (leaf, nested path, Account/path, trash
+   * excluded) and only when the generated code actually calls the shared
+   * helper; batch calls return one note per folder, titled by its index.
+   */
+  function mockLibrary() {
+    vi.mocked(executeJxa).mockReset();
+    vi.mocked(executeJxa).mockImplementation(async (...args: Parameters<typeof executeJxa>) => {
+      const src = String(args[0]);
+      if (src.includes("folders.name()")) {
+        return JSON.stringify({ names: folders.map((f) => f.name), counts: folders.map(() => 1) });
+      }
+      const refMatch = src.match(/const folderRef = ("(?:[^"\\]|\\.)*");/);
+      if (refMatch) {
+        if (!src.includes("folderMatches(") || !src.includes("isTrashFolder(")) {
+          throw new Error("reference match must reuse FOLDER_JXA_HELPERS");
+        }
+        const ref = JSON.parse(refMatch[1]) as string;
+        const hits = folders
+          .map((f, index) => ({ f, index }))
+          .filter(({ f }) => f.name !== "Recently Deleted")
+          .filter(({ f }) => f.name === ref || f.path === ref || `${f.account}/${f.path}` === ref)
+          .map(({ f, index }) => ({ index, name: f.name }));
+        return JSON.stringify(hits);
+      }
+      if (src.includes(".slice(")) {
+        const index = parseFolderIndex(src);
+        const expected = parseExpectedName(src);
+        if (folders[index]?.name.toLowerCase() !== expected.toLowerCase()) {
+          throw new Error(`[FOLDER_MISMATCH] index ${index}`);
+        }
+        return JSON.stringify([
+          { id: `n-${index}`, title: `In ${index}`, folder: folders[index].name, created: "", modified: "" },
+        ]);
+      }
+      throw new Error(`mockLibrary: unexpected JXA call: ${src.slice(0, 160)}`);
+    });
+  }
+
+  function fetchedIndices(): number[] {
+    return vi
+      .mocked(executeJxa)
+      .mock.calls.map(([code]) => String(code))
+      .filter((code) => code.includes(".slice("))
+      .map(parseFolderIndex);
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("selects only the account's folder for Account/Folder", async () => {
+    mockLibrary();
+    const notes = await listNotes({ folder: "iCloud/Notes" });
+    expect(notes.map((n) => n.id)).toEqual(["n-1"]);
+    expect(fetchedIndices()).toEqual([1]);
+  });
+
+  it("selects only the nested folder for Parent/Child", async () => {
+    mockLibrary();
+    const notes = await listNotes({ folder: "Projects/Child" });
+    expect(notes.map((n) => n.id)).toEqual(["n-3"]);
+    expect(fetchedIndices()).toEqual([3]);
+  });
+
+  it("aggregates every same-named folder for a leaf name, case-insensitively", async () => {
+    mockLibrary();
+    const notes = await listNotes({ folder: "child", sort_by: "title", order: "asc" });
+    expect(notes.map((n) => n.id)).toEqual(["n-3", "n-4"]);
+    expect(fetchedIndices()).toEqual([3, 4]);
+    // Leaf names resolve from the enumeration alone.
+    expect(vi.mocked(executeJxa).mock.calls.some(([code]) => String(code).includes("const folderRef"))).toBe(false);
+  });
+
+  it("never selects the trash folder", async () => {
+    mockLibrary();
+    expect(await listNotes({ folder: "iCloud/Recently Deleted" })).toEqual([]);
+    expect(await listNotes({ folder: "recently deleted" })).toEqual([]);
+    expect(fetchedIndices()).toEqual([]);
+  });
+});

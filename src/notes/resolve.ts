@@ -38,25 +38,52 @@ export interface NoteLookupCandidate {
 }
 
 /**
- * Scripting name of Apple Notes' trash folder, lowercased. Notes reports it
- * in English regardless of the system language, once per account.
+ * Names of Apple Notes' trash folder. Notes reports the folder under the
+ * system language's name (once per account), so English plus the common
+ * localizations are built in; NOTES_TRASH_FOLDER adds any other one.
  */
-const TRASH_FOLDER_NAME = "recently deleted";
+const BUILTIN_TRASH_FOLDER_NAMES = [
+  "Recently Deleted",
+  "Nedávno smazané", // cs
+  "Zuletzt gelöscht", // de
+  "Suppressions récentes", // fr
+  "Eliminado recientemente", // es
+  "Eliminati di recente", // it
+  "Ostatnio usunięte", // pl
+  "Nedávno vymazané", // sk
+  "Recent verwijderd", // nl
+  "Apagadas recentemente", // pt
+  "Nylig slettet", // nb
+  "Nyligen raderade", // sv
+  "Nyligt slettet", // da
+];
+
+/** Comparison key: trimmed, NFC, lowercased. Mirrored by the JXA isTrashFolder. */
+function normalizeFolderName(name: string): string {
+  return name.trim().normalize("NFC").toLowerCase();
+}
+
+/** Normalized trash folder names, read once at load (the .env is loaded first). */
+const TRASH_FOLDER_NAMES: string[] = [
+  ...BUILTIN_TRASH_FOLDER_NAMES,
+  ...(process.env.NOTES_TRASH_FOLDER?.trim() ? [process.env.NOTES_TRASH_FOLDER] : []),
+].map(normalizeFolderName);
 
 /**
- * True for the "Recently Deleted" trash folder (case-insensitive exact
- * name, any account). Trashed notes are never listed, indexed, resolved by
+ * True for the trash folder (case-insensitive exact name, any account, any
+ * known language). Trashed notes are never listed, indexed, resolved by
  * title or targeted by folder writes; only `id:` lookups can still reach one.
  */
 export function isTrashFolderName(name: string): boolean {
-  return name.trim().toLowerCase() === TRASH_FOLDER_NAME;
+  return TRASH_FOLDER_NAMES.includes(normalizeFolderName(name));
 }
 
 /**
  * JXA helpers shared by every script that addresses folders. Expects `app`
  * (Application('Notes')) in scope.
  *
- * - `isTrashFolder(f)`: the "Recently Deleted" folder (see isTrashFolderName).
+ * - `isTrashFolder(f)`: the trash folder in any known language (see
+ *   isTrashFolderName; same name list).
  * - `folderPathInfo(f)`: leaf name, nested path (`Parent/Child`) and account
  *   name. `app.folders()` is flat (nested folders included), so the path is
  *   rebuilt from the `container()` chain.
@@ -69,7 +96,9 @@ export function isTrashFolderName(name: string): boolean {
  */
 export const FOLDER_JXA_HELPERS = `
     function isTrashFolder(f) {
-      return String(f.name()).trim().toLowerCase() === ${JSON.stringify(TRASH_FOLDER_NAME)};
+      return ${JSON.stringify(TRASH_FOLDER_NAMES)}.indexOf(
+        String(f.name()).trim().normalize('NFC').toLowerCase()
+      ) !== -1;
     }
 
     function folderPathInfo(f) {

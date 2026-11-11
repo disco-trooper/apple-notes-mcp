@@ -4,6 +4,9 @@
  * Every function re-reads notes by id (never by title) and runs its index
  * write under the index lock. Failures become warnings: the Apple Notes
  * write already succeeded, so the index is only stale until the next sync.
+ *
+ * While an index job holds the lock, the sync is queued behind it and the
+ * call returns immediately with a warning instead of blocking the tool.
  */
 
 import { syncNotesById, removeNotesFromIndex } from "./indexer.js";
@@ -13,6 +16,7 @@ import type {
   MoveResult,
   UpdateResult,
 } from "../notes/crud.js";
+import { isIndexLocked } from "../indexing/lock.js";
 import { createDebugLogger } from "../utils/debug.js";
 
 const debug = createDebugLogger("WRITE-SYNC");
@@ -22,7 +26,25 @@ export interface WriteSyncResult {
   warnings: string[];
 }
 
+export const QUEUED_SYNC_WARNING = "index update queued behind a running index job";
+
 async function runSync(action: string, operation: () => Promise<string[]>): Promise<WriteSyncResult> {
+  if (isIndexLocked()) {
+    // runOperation never rejects (failures become warnings), so nothing goes unobserved.
+    void runOperation(action, operation).then((result) => {
+      if (result.warnings.length > 0) {
+        debug(`Queued write sync finished with warnings (${action}):`, result.warnings);
+      }
+    });
+    return { ok: true, warnings: [QUEUED_SYNC_WARNING] };
+  }
+  return runOperation(action, operation);
+}
+
+async function runOperation(
+  action: string,
+  operation: () => Promise<string[]>
+): Promise<WriteSyncResult> {
   try {
     const warnings = await operation();
     return { ok: warnings.length === 0, warnings };

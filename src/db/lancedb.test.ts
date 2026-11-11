@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -204,6 +204,49 @@ describe("LanceDBStore", () => {
     await store.index([record("b")]);
     expect((await store.getIndexMetadata()).map((r) => r.id)).toEqual(["b"]);
   });
+
+  it("a search racing a re-index never caches a handle without the FTS index", async () => {
+    await store.index([record("a", { content: "alpha words" })]);
+
+    // Reach the prototypes the store's own connection and tables use.
+    const conn = await lancedb.connect(testDbPath);
+    const connProto = Object.getPrototypeOf(conn) as lancedb.Connection;
+    const tableProto = Object.getPrototypeOf(await conn.openTable("notes")) as lancedb.Table;
+    const openTable = connProto.openTable;
+    const createIndex = tableProto.createIndex;
+
+    // A reader that opens the table during the re-index gets a handle of that
+    // moment and only hands it back after the re-index finished.
+    let releaseOpen!: () => void;
+    const openGate = new Promise<void>((resolve) => (releaseOpen = resolve));
+    let signalOpened!: () => void;
+    const opened = new Promise<void>((resolve) => (signalOpened = resolve));
+    const openSpy = vi.spyOn(connProto, "openTable").mockImplementation(async function (this: lancedb.Connection, ...args) {
+      const table = await openTable.apply(this, args);
+      signalOpened();
+      await openGate;
+      return table;
+    });
+    let racingSearch: Promise<unknown> | undefined;
+    const indexSpy = vi.spyOn(tableProto, "createIndex").mockImplementation(async function (this: lancedb.Table, ...args) {
+      if (!racingSearch) {
+        racingSearch = store.searchFTS("beta", 5).catch(() => []);
+        await Promise.race([opened, racingSearch]);
+      }
+      return createIndex.apply(this, args);
+    });
+
+    try {
+      await store.index([record("b", { content: "beta words" })]);
+      releaseOpen();
+      await racingSearch;
+    } finally {
+      openSpy.mockRestore();
+      indexSpy.mockRestore();
+    }
+
+    expect((await store.searchFTS("beta", 5)).map((r) => r.id)).toEqual(["b"]);
+  });
 });
 
 describe("ChunkStore", () => {
@@ -226,17 +269,17 @@ describe("ChunkStore", () => {
     expect((await chunkStore.getNoteMetadata()).map((m) => m.note_id)).toEqual(["n2"]);
   });
 
-  it("getNoteMetadata returns one entry per note with modified", async () => {
+  it("getNoteMetadata returns one entry per note with title, folder and modified", async () => {
     await chunkStore.indexChunks([
       chunk("n1", 0, { modified: "2026-05-01T00:00:00.000Z" }),
       chunk("n1", 1, { modified: "2026-05-01T00:00:00.000Z" }),
-      chunk("n2", 0, { modified: "2026-06-01T00:00:00.000Z" }),
+      chunk("n2", 0, { modified: "2026-06-01T00:00:00.000Z", folder: "Q1/Plans" }),
     ]);
 
     const metadata = await chunkStore.getNoteMetadata();
     expect(metadata.sort((a, b) => a.note_id.localeCompare(b.note_id))).toEqual([
-      { note_id: "n1", modified: "2026-05-01T00:00:00.000Z" },
-      { note_id: "n2", modified: "2026-06-01T00:00:00.000Z" },
+      { note_id: "n1", note_title: "Note n1", folder: "Test", modified: "2026-05-01T00:00:00.000Z" },
+      { note_id: "n2", note_title: "Note n2", folder: "Q1/Plans", modified: "2026-06-01T00:00:00.000Z" },
     ]);
   });
 

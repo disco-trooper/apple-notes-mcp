@@ -29,10 +29,12 @@ function isHexColor(value: string): boolean {
 
 /**
  * Hashtag: `#` not preceded by a word character, `/`, `&`, `#` or `\`
- * (so `foo#bar`, `&#123;` and `##` don't match), then Unicode letters,
- * digits, `_` and `-`.
+ * (so `foo#bar`, `&#123;` and `##` don't match), nor by `_` that follows a
+ * word character (`foo_#bar`); a lone `_` is Turndown italics (`_#idea_`).
+ * Then Unicode letters, digits, `_` and `-`.
  */
-const TAG_PATTERN = /(?<![\p{L}\p{N}\p{M}_/&#\\])#([\p{L}\p{N}_][\p{L}\p{N}\p{M}_-]*)/gu;
+const TAG_PATTERN =
+  /(?<![\p{L}\p{N}\p{M}/&#\\])(?<![\p{L}\p{N}\p{M}]_)#([\p{L}\p{N}_][\p{L}\p{N}\p{M}_-]*)/gu;
 
 /**
  * Extract hashtags from content, lowercased and deduplicated.
@@ -44,7 +46,7 @@ export function extractTags(content: string): string[] {
   const text = prepare(content).replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, "");
   const tags: string[] = [];
   for (const match of text.matchAll(TAG_PATTERN)) {
-    const tag = match[1].replace(/-+$/, "").toLowerCase();
+    const tag = match[1].replace(/[-_]+$/, "").toLowerCase();
     if (tag.length < 2 || /^\d+$/.test(tag) || isHexColor(tag)) continue;
     tags.push(tag);
   }
@@ -53,16 +55,31 @@ export function extractTags(content: string): string[] {
 
 /**
  * Extract wiki-style [[links]] from content.
- * `[[Title|alias]]` and `[[Title#heading]]` resolve to `Title`.
+ * `[[Title|alias]]` resolves to `Title`; `#` is kept because it may be part
+ * of the title (`[[C# cheatsheet]]`). Use resolveLink to look targets up.
  * Ignores links inside code blocks.
  */
 export function extractOutlinks(content: string): string[] {
   const links: string[] = [];
-  for (const match of prepare(content).matchAll(/\[\[([^[\]\n]+)\]\]/g)) {
-    const target = match[1].split("|")[0].split("#")[0].trim();
+  // `[[x]](url)` is a Markdown link with a bracketed label, not a wiki link.
+  for (const match of prepare(content).matchAll(/\[\[([^[\]\n]+)\]\](?!\()/g)) {
+    const target = match[1].split("|")[0].trim();
     if (target) links.push(target);
   }
   return [...new Set(links)];
+}
+
+/**
+ * Resolve an outlink against a lowercase-title map: the full target first
+ * (`C# cheatsheet`), then the part before `#` (`Note#heading` -> `Note`).
+ */
+export function resolveLink<T>(link: string, byLowerTitle: Map<string, T>): T | undefined {
+  const key = link.toLowerCase();
+  const exact = byLowerTitle.get(key);
+  if (exact !== undefined) return exact;
+  const hash = key.indexOf("#");
+  if (hash <= 0) return undefined;
+  return byLowerTitle.get(key.slice(0, hash).trim());
 }
 
 export interface NoteMetadata {

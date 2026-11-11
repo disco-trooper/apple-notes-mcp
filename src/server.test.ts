@@ -48,6 +48,9 @@ import { searchChunks } from "./search/chunk-search.js";
 import { getVectorStore } from "./db/lancedb.js";
 import { getIndexJobManager } from "./indexing/job-manager.js";
 import { listTags } from "./graph/queries.js";
+import { indexNotes } from "./search/indexer.js";
+import { updateNote } from "./notes/crud.js";
+import { syncAfterUpdate } from "./search/write-sync.js";
 
 const READ_TOOLS = [
   "search-notes",
@@ -208,5 +211,56 @@ describe("MCP server", () => {
 
     expect(result.job_id).toBe("job-1");
     expect(result.message).toContain("already running (mode=incremental)");
+  });
+
+  it("forwards foreground index progress as MCP progress notifications", async () => {
+    vi.mocked(indexNotes).mockImplementation(async (_mode, options) => {
+      options?.onProgress?.({ stage: "fetch", current: 1, total: 2, message: "Fetching notes" });
+      options?.onProgress?.({ stage: "embed", current: 1, total: 5, message: "Embedding" });
+      return { total: 2, indexed: 2, timeMs: 1 };
+    });
+    const progress: Array<{ progress: number; message?: string }> = [];
+
+    const result = await client.callTool(
+      { name: "index-notes", arguments: { mode: "full" } },
+      undefined,
+      { onprogress: (p) => progress.push(p) }
+    );
+
+    expect(result.isError).toBeFalsy();
+    expect(progress.map((p) => p.progress)).toEqual([1, 2]);
+    expect(progress[0].message).toContain("Fetching notes");
+    expect(progress[1].message).toContain("embed");
+  });
+
+  it("does not request progress callbacks when the client sent no progress token", async () => {
+    vi.mocked(indexNotes).mockResolvedValue({ total: 0, indexed: 0, timeMs: 1 });
+
+    await client.callTool({ name: "index-notes", arguments: {} });
+
+    expect(vi.mocked(indexNotes).mock.calls[0][1]?.onProgress).toBeUndefined();
+  });
+
+  it("reports a write-sync queued behind a running index job", async () => {
+    vi.mocked(updateNote).mockResolvedValue({
+      id: "n1",
+      originalTitle: "Budget",
+      newTitle: "Budget",
+      folder: "Work",
+      titleChanged: false,
+    });
+    vi.mocked(syncAfterUpdate).mockResolvedValue({
+      ok: true,
+      warnings: ["index update queued behind a running index job"],
+    });
+
+    const message = text(await client.callTool({
+      name: "update-note",
+      arguments: { title: "Budget", content: "new" },
+    }));
+
+    expect(message).toContain("index update queued behind a running index job");
+    expect(message).not.toContain("reindexed");
+    expect(message).not.toContain("warning");
   });
 });

@@ -11,6 +11,7 @@ import { executeJxa } from "./jxa-runner.js";
 import { resolveNoteTitle, FOLDER_JXA_HELPERS } from "./resolve.js";
 import { applyTableEdits } from "./tables.js";
 import { createDebugLogger } from "../utils/debug.js";
+import { getNotesFetchBatchSize } from "../config/constants.js";
 import { envFlag } from "../config/env.js";
 import { ReadOnlyModeError, NoteNotFoundError, DuplicateNoteError } from "../errors/index.js";
 
@@ -70,15 +71,25 @@ function markdownToHtml(markdown: string): string {
 /**
  * Body HTML for a new note. `app.Note({name})` already writes the title as
  * the note's first line, so a first content line repeating the title
- * (plain or as a Markdown heading) is dropped to avoid a duplicate.
+ * (plain, as a Markdown ATX heading, or as a setext heading with its
+ * `===`/`---` underline) is dropped to avoid a duplicate.
  */
 function buildNewNoteHtml(title: string, content: string): string {
   const lines = content.split("\n");
   const first = lines.findIndex((line) => line.trim().length > 0);
-  if (first !== -1 && lines[first].trim().replace(/^#{1,6}\s+/, "").trim() === title.trim()) {
-    return markdownToHtml(lines.slice(first + 1).join("\n").replace(/^\s*\n/, ""));
+  if (first === -1) {
+    return markdownToHtml(content);
   }
-  return markdownToHtml(content);
+  const firstLine = lines[first].trim();
+  const isAtx = /^#{1,6}\s+/.test(firstLine);
+  if (firstLine.replace(/^#{1,6}\s+/, "").trim() !== title.trim()) {
+    return markdownToHtml(content);
+  }
+  let rest = first + 1;
+  if (!isAtx && rest < lines.length && /^\s{0,3}(=+|-+)\s*$/.test(lines[rest])) {
+    rest++;
+  }
+  return markdownToHtml(lines.slice(rest).join("\n").replace(/^\s*\n/, ""));
 }
 
 export interface CreateResult {
@@ -256,6 +267,36 @@ export interface MoveResult {
 }
 
 /**
+ * Move one resolved note to the folder a JXA expression evaluates to.
+ * `targetSetup` declares `targetFolder` (it may throw for a missing folder).
+ */
+async function moveResolvedNote(note: NoteRef, targetSetup: string): Promise<MoveResult> {
+  const result = await executeJxa<string>(`
+    const app = Application('Notes');
+    ${FOLDER_JXA_HELPERS}
+
+    ${targetSetup}
+    const note = app.notes.byId(${JSON.stringify(note.id)});
+    if (!note.exists()) {
+      throw new Error("Note no longer exists");
+    }
+
+    note.move({to: targetFolder});
+
+    return JSON.stringify({ toFolder: targetFolder.name() });
+  `);
+
+  const { toFolder } = JSON.parse(result) as { toFolder: string };
+
+  return {
+    id: note.id,
+    title: note.title,
+    fromFolder: note.folder,
+    toFolder,
+  };
+}
+
+/**
  * Move a note to a different folder.
  *
  * @param title - Note title, "folder/title" or "id:xxx"
@@ -270,32 +311,13 @@ export async function moveNote(title: string, folder: string): Promise<MoveResul
   debug(`Moving note: "${title}" to folder: "${folder}"`);
 
   const note = await resolveNoteOrThrow(title);
+  const moved = await moveResolvedNote(
+    note,
+    `const targetFolder = findFolder(${JSON.stringify(folder)}, 'Folder');`
+  );
 
-  const result = await executeJxa<string>(`
-    const app = Application('Notes');
-    ${FOLDER_JXA_HELPERS}
-
-    const targetFolder = findFolder(${JSON.stringify(folder)}, 'Folder');
-    const note = app.notes.byId(${JSON.stringify(note.id)});
-    if (!note.exists()) {
-      throw new Error("Note no longer exists");
-    }
-
-    note.move({to: targetFolder});
-
-    return JSON.stringify({ toFolder: targetFolder.name() });
-  `);
-
-  const { toFolder } = JSON.parse(result) as { toFolder: string };
-
-  debug(`Note moved: "${title}" -> "${toFolder}"`);
-
-  return {
-    id: note.id,
-    title: note.title,
-    fromFolder: note.folder,
-    toFolder,
-  };
+  debug(`Note moved: "${title}" -> "${moved.toFolder}"`);
+  return moved;
 }
 
 export interface TableEdit {
@@ -308,9 +330,9 @@ export interface TableEdit {
  * Edit cells in a table within a note.
  *
  * Read-modify-write over two JXA calls: the write re-checks the note's
- * modification date and aborts when the note changed in between (sync,
- * user typing), so concurrent edits are never overwritten.
- *
+ * modification date and body and aborts when either changed in between
+ * (sync, user typing; the date alone has only second precision), so
+ * concurrent edits are never overwritten.
  * @param title - Note title, "folder/title" or "id:xxx"
  * @param tableIndex - Which table to edit (0-based)
  * @param edits - Cell edits to apply
@@ -352,7 +374,8 @@ export async function editTable(
         throw new Error("Note no longer exists");
       }
       const current = note.modificationDate();
-      if ((current ? current.toISOString() : '') !== ${JSON.stringify(snapshot.modified)}) {
+      if ((current ? current.toISOString() : '') !== ${JSON.stringify(snapshot.modified)} ||
+          note.body() !== ${JSON.stringify(snapshot.html)}) {
         throw new Error("Note was modified while the table edit was prepared; nothing was written. Retry the edit.");
       }
       note.body = ${JSON.stringify(updatedHtml)};
@@ -363,6 +386,25 @@ export async function editTable(
   debug(`Table ${tableIndex} updated in note: "${title}"`);
 
   return { id: note.id, title: written.title, folder: written.folder };
+}
+
+/** Folder contents captured before a grouped batch operation. */
+interface FolderListing {
+  ids: string[];
+  names: string[];
+}
+
+/** Split parallel id/name arrays into groups of the fetch batch size. */
+function groupListing(listing: FolderListing): FolderListing[] {
+  const size = getNotesFetchBatchSize();
+  const groups: FolderListing[] = [];
+  for (let start = 0; start < listing.ids.length; start += size) {
+    groups.push({
+      ids: listing.ids.slice(start, start + size),
+      names: listing.names.slice(start, start + size),
+    });
+  }
+  return groups;
 }
 
 /**
@@ -412,34 +454,53 @@ export async function batchDelete(options: BatchDeleteOptions): Promise<BatchDel
   if (folder) {
     debug(`Batch deleting all notes in folder: "${folder}"`);
 
-    // Ids are captured first, then each note is deleted by id, so the loop
-    // never depends on index positions shifting under it.
-    const jxaResult = await executeJxa<string>(`
-      const app = Application('Notes');
-      ${FOLDER_JXA_HELPERS}
+    // Ids are captured first, then notes are deleted by id in groups (one
+    // JXA call per group): no index positions shift under the loop, a slow
+    // group can't time out the whole run, and finished groups are kept.
+    const listing = JSON.parse(
+      await executeJxa<string>(`
+        const app = Application('Notes');
+        ${FOLDER_JXA_HELPERS}
 
-      const folder = findFolder(${JSON.stringify(folder)}, 'Folder');
-      const folderName = folder.name();
-      const ids = folder.notes.id();
-      const names = folder.notes.name();
-      const deleted = [];
-      const failed = [];
+        const folder = findFolder(${JSON.stringify(folder)}, 'Folder');
+        return JSON.stringify({
+          folderName: folder.name(),
+          ids: folder.notes.id(),
+          names: folder.notes.name(),
+        });
+      `)
+    ) as FolderListing & { folderName: string };
 
-      for (let i = 0; i < ids.length; i++) {
-        try {
-          app.notes.byId(ids[i]).delete();
-          deleted.push({ id: ids[i], title: names[i] || '', folder: folderName });
-        } catch (e) {
-          failed.push(names[i] || ids[i]);
-        }
+    for (const group of groupListing(listing)) {
+      try {
+        const parsed = JSON.parse(
+          await executeJxa<string>(`
+            const app = Application('Notes');
+            const folderName = ${JSON.stringify(listing.folderName)};
+            const ids = ${JSON.stringify(group.ids)};
+            const names = ${JSON.stringify(group.names)};
+            const deleted = [];
+            const failed = [];
+
+            for (let i = 0; i < ids.length; i++) {
+              try {
+                app.notes.byId(ids[i]).delete();
+                deleted.push({ id: ids[i], title: names[i] || '', folder: folderName });
+              } catch (e) {
+                failed.push(names[i] || ids[i]);
+              }
+            }
+
+            return JSON.stringify({ deleted: deleted, failed: failed });
+          `)
+        ) as BatchDeleteResult;
+        result.deleted.push(...parsed.deleted);
+        result.failed.push(...parsed.failed);
+      } catch (error) {
+        result.failed.push(...group.ids.map((id, i) => group.names[i] || id));
+        debug(`Delete group of ${group.ids.length} notes failed:`, error);
       }
-
-      return JSON.stringify({ deleted: deleted, failed: failed });
-    `);
-
-    const parsed = JSON.parse(jxaResult) as BatchDeleteResult;
-    result.deleted = parsed.deleted;
-    result.failed = parsed.failed;
+    }
   } else if (titles) {
     debug(`Batch deleting ${titles.length} notes by title`);
 
@@ -511,40 +572,77 @@ export async function batchMove(options: BatchMoveOptions): Promise<BatchMoveRes
   if (sourceFolder) {
     debug(`Batch moving all notes from "${sourceFolder}" to "${targetFolder}"`);
 
-    const jxaResult = await executeJxa<string>(`
-      const app = Application('Notes');
-      ${FOLDER_JXA_HELPERS}
+    // Both folders are resolved and the ids captured once; notes then move
+    // by id in groups (one JXA call per group), keeping finished groups
+    // even when a later one fails or times out.
+    const listing = JSON.parse(
+      await executeJxa<string>(`
+        const app = Application('Notes');
+        ${FOLDER_JXA_HELPERS}
 
-      const source = findFolder(${JSON.stringify(sourceFolder)}, 'Source folder');
-      const target = findFolder(${JSON.stringify(targetFolder)}, 'Target folder');
-      const sourceName = source.name();
-      const targetName = target.name();
-      const ids = source.notes.id();
-      const names = source.notes.name();
-      const moved = [];
-      const failed = [];
+        const source = findFolder(${JSON.stringify(sourceFolder)}, 'Source folder');
+        const target = findFolder(${JSON.stringify(targetFolder)}, 'Target folder');
+        return JSON.stringify({
+          sourceName: source.name(),
+          targetId: target.id(),
+          targetName: target.name(),
+          ids: source.notes.id(),
+          names: source.notes.name(),
+        });
+      `)
+    ) as FolderListing & { sourceName: string; targetId: string; targetName: string };
 
-      for (let i = 0; i < ids.length; i++) {
-        try {
-          app.notes.byId(ids[i]).move({to: target});
-          moved.push({ id: ids[i], title: names[i] || '', folder: targetName, fromFolder: sourceName });
-        } catch (e) {
-          failed.push(names[i] || ids[i]);
-        }
+    for (const group of groupListing(listing)) {
+      try {
+        const parsed = JSON.parse(
+          await executeJxa<string>(`
+            const app = Application('Notes');
+            const target = app.folders.byId(${JSON.stringify(listing.targetId)});
+            const sourceName = ${JSON.stringify(listing.sourceName)};
+            const targetName = ${JSON.stringify(listing.targetName)};
+            const ids = ${JSON.stringify(group.ids)};
+            const names = ${JSON.stringify(group.names)};
+            const moved = [];
+            const failed = [];
+
+            for (let i = 0; i < ids.length; i++) {
+              try {
+                app.notes.byId(ids[i]).move({to: target});
+                moved.push({ id: ids[i], title: names[i] || '', folder: targetName, fromFolder: sourceName });
+              } catch (e) {
+                failed.push(names[i] || ids[i]);
+              }
+            }
+
+            return JSON.stringify({ moved: moved, failed: failed });
+          `)
+        ) as BatchMoveResult;
+        result.moved.push(...parsed.moved);
+        result.failed.push(...parsed.failed);
+      } catch (error) {
+        result.failed.push(...group.ids.map((id, i) => group.names[i] || id));
+        debug(`Move group of ${group.ids.length} notes failed:`, error);
       }
-
-      return JSON.stringify({ moved: moved, failed: failed });
-    `);
-
-    const parsed = JSON.parse(jxaResult) as BatchMoveResult;
-    result.moved = parsed.moved;
-    result.failed = parsed.failed;
+    }
   } else if (titles) {
     debug(`Batch moving ${titles.length} notes to "${targetFolder}"`);
 
+    // Resolve the target once: a missing or ambiguous folder is a caller
+    // error for the whole batch, not a per-note failure.
+    const { targetId } = JSON.parse(
+      await executeJxa<string>(`
+        const app = Application('Notes');
+        ${FOLDER_JXA_HELPERS}
+
+        const target = findFolder(${JSON.stringify(targetFolder)}, 'Target folder');
+        return JSON.stringify({ targetId: target.id() });
+      `)
+    ) as { targetId: string };
+    const targetSetup = `const targetFolder = app.folders.byId(${JSON.stringify(targetId)});`;
+
     for (const title of titles) {
       try {
-        const moved = await moveNote(title, targetFolder);
+        const moved = await moveResolvedNote(await resolveNoteOrThrow(title), targetSetup);
         result.moved.push({
           id: moved.id,
           title: moved.title,

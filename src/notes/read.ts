@@ -6,7 +6,7 @@
  */
 
 import { executeJxa, type JxaRunOptions } from "./jxa-runner.js";
-import { resolveNoteTitle, isTrashFolderName } from "./resolve.js";
+import { resolveNoteTitle, isTrashFolderName, FOLDER_JXA_HELPERS } from "./resolve.js";
 import { createDebugLogger } from "../utils/debug.js";
 import { htmlToMarkdown } from "./conversion.js";
 import { getNotesFetchBatchSize } from "../config/constants.js";
@@ -545,6 +545,69 @@ function filterFolderIndices(names: string[], folderName: string, caseInsensitiv
   );
 }
 
+/**
+ * Build JXA returning `[{ index, name }]` for every non-trash folder that
+ * `folderMatches` (FOLDER_JXA_HELPERS) accepts for `ref`: the leaf name, the
+ * nested path (`Parent/Child`) or `Account/path` — the same references the
+ * write path resolves. Indices are positions in `app.folders()`.
+ */
+function buildFolderRefMatchJxa(ref: string): string {
+  return `
+    const app = Application('Notes');
+    ${FOLDER_JXA_HELPERS}
+    const folderRef = ${JSON.stringify(ref)};
+    const all = app.folders();
+    const hits = [];
+    for (let i = 0; i < all.length; i++) {
+      const f = all[i];
+      try {
+        if (!isTrashFolder(f) && folderMatches(f, folderRef)) {
+          hits.push({ index: i, name: f.name() });
+        }
+      } catch (folderErr) {}
+    }
+    return JSON.stringify(hits);
+  `;
+}
+
+/** One folder selected by a folder reference: enumeration index plus its real name. */
+interface FolderTarget {
+  index: number;
+  name: string;
+}
+
+/**
+ * Resolve a folder reference against an enumeration. Leaf names match in
+ * TS (case-folded when `caseInsensitive`), and every same-named folder is
+ * selected so duplicates aggregate. A reference containing `/` that matches
+ * no leaf name is resolved in JXA through `folderMatches` (nested path or
+ * `Account/path`), so reads accept the same folder references as writes.
+ * Trash folders are never selected.
+ */
+async function resolveFolderTargets(
+  names: string[],
+  ref: string,
+  caseInsensitive: boolean,
+  runOpts: JxaRunOptions
+): Promise<FolderTarget[]> {
+  const leafMatches = filterFolderIndices(names, ref, caseInsensitive);
+  if (leafMatches.length > 0 || !ref.includes("/")) {
+    return leafMatches.map((index) => ({ index, name: names[index] }));
+  }
+  const parsed: unknown = JSON.parse(await executeJxa<string>(buildFolderRefMatchJxa(ref), runOpts));
+  if (!Array.isArray(parsed)) {
+    throw new Error(`Invalid folder match payload for "${ref}": expected an array.`);
+  }
+  return parsed.filter(
+    (hit): hit is FolderTarget =>
+      !!hit &&
+      typeof hit === "object" &&
+      Number.isInteger((hit as FolderTarget).index) &&
+      typeof (hit as FolderTarget).name === "string" &&
+      !isTrashFolderName((hit as FolderTarget).name)
+  );
+}
+
 /** Resolve and validate the per-call batch size for one folder label. */
 function resolveBatchSize(requested: number | undefined, label: string): number {
   const batchSize = requested !== undefined ? Math.floor(requested) : getNotesFetchBatchSize();
@@ -614,7 +677,7 @@ function isFolderMismatchError(error: unknown): boolean {
  * `knownCount` from the folder enumeration to skip the count call, and
  * `occurrence` (position among the enumeration's same-name matches) so a
  * mid-fetch remap finds the same duplicate folder back.
- * @returns Raw notes (unfiltered) plus skip entries in `folder/title` format
+ * @returns Raw notes (unfiltered) plus skip entries (shapes: see FallbackResult)
  */
 async function fetchFolderIndexBatched(
   folderIndex: number,
@@ -868,18 +931,22 @@ async function fetchFolderIndexBatched(
 }
 
 /**
- * Fetch all notes of the folders named `folderName` in small JXA batches.
+ * Fetch all notes of the folders selected by `folderName` in small JXA
+ * batches.
  *
- * Enumerates folders once, resolves matching enumeration indices in TS
- * (case-folded on the metadata path, strict otherwise), and fetches every
- * matching index separately so duplicate folder names aggregate.
+ * Enumerates folders once and resolves the reference with
+ * resolveFolderTargets: a leaf name (case-folded on the metadata path,
+ * strict otherwise) selects every same-named folder so duplicates
+ * aggregate; a nested `Parent/Child` path or `Account/Folder` selects only
+ * the matching folders. Each selected index is fetched separately under
+ * its real folder name.
  *
- * @param folderName - The folder name to fetch notes from
+ * @param folderName - Folder reference: leaf name, nested path or `Account/path`
  * @param opts - Batch size, progress callback, timeout and abort signal.
  * Set `caseInsensitive` for the metadata path (getNoteMetadataByFolder),
  * which restores the pre-bulk-fetch case-insensitive folder lookup.
  * Content/single-note callers keep the default strict match.
- * @returns Raw notes (unfiltered) plus skip entries in `folder/title` format
+ * @returns Raw notes (unfiltered) plus skip entries (see FallbackResult)
  */
 export async function fetchFolderBatched(
   folderName: string,
@@ -894,24 +961,27 @@ export async function fetchFolderBatched(
 
   const runOpts: JxaRunOptions = { signal: opts?.signal, timeoutMs: opts?.timeoutMs };
   const { names, counts } = await enumerateFoldersWithCounts(runOpts);
-  const indices = filterFolderIndices(names, folderName, caseInsensitive);
+  const targets = await resolveFolderTargets(names, folderName, caseInsensitive, runOpts);
 
   const notes: RawNoteData[] = [];
   const skipped: string[] = [];
-  // The position among the same-name matches is the folder's occurrence:
-  // fetchFolderIndexBatched remaps by (name, occurrence) when the folder
-  // list shifts mid-fetch, so duplicates keep their identity.
-  for (let occurrence = 0; occurrence < indices.length; occurrence++) {
-    const folderIndex = indices[occurrence];
+  for (const target of targets) {
     if (opts?.signal?.aborted) {
       throw new IndexCancelledError(`Fetch of folder "${folderName}" cancelled`);
     }
+    // The enumeration still holds this name at this index: its count is
+    // usable, and its position among same-name matches is the occurrence
+    // fetchFolderIndexBatched remaps by when the folder list shifts.
+    const inSync = names[target.index] === target.name;
+    const occurrence = inSync
+      ? filterFolderIndices(names, target.name, caseInsensitive).indexOf(target.index)
+      : 0;
     const base = notes.length;
-    const result = await fetchFolderIndexBatched(folderIndex, folderName, {
+    const result = await fetchFolderIndexBatched(target.index, target.name, {
       ...opts,
       batchSize,
-      knownCount: counts?.[folderIndex],
-      occurrence,
+      knownCount: inSync ? counts?.[target.index] : undefined,
+      occurrence: Math.max(occurrence, 0),
       onBatch: (fetched) => opts?.onBatch?.(base + fetched),
     });
     notes.push(...result.notes);
@@ -1065,22 +1135,23 @@ function buildFolderNoteIdsJxa(folderIndex: number, expectedName: string): strin
  * Folders are fetched sequentially in small batches (default
  * getNotesFetchBatchSize()) instead of one oversized call, which keeps
  * osascript payloads small and lets a failed batch retry note-by-note
- * without losing the rest.
+ * without losing the rest. Every folder's skip entries are collected.
  */
-async function getAllNotesWithContent(opts?: BulkFetchOptions): Promise<NoteDetails[]> {
+async function getAllNotesWithContent(opts?: BulkFetchOptions): Promise<FallbackResult> {
   debug("Getting all notes with content (batched JXA calls)...");
 
   const runOpts: JxaRunOptions = { signal: opts?.signal, timeoutMs: opts?.timeoutMs };
   const { names, counts } = await enumerateFoldersWithCounts(runOpts);
 
   const allNotes: NoteDetails[] = [];
+  const skipped: string[] = [];
   for (const folderIndex of listedFolderIndices(names)) {
     if (opts?.signal?.aborted) {
       throw new IndexCancelledError("Fetch of all notes cancelled");
     }
     const folderName = names[folderIndex];
     const base = allNotes.length;
-    const { notes } = await fetchFolderIndexBatched(folderIndex, folderName, {
+    const { notes, skipped: folderSkipped } = await fetchFolderIndexBatched(folderIndex, folderName, {
       ...opts,
       knownCount: counts?.[folderIndex],
       occurrence: occurrenceAt(names, folderIndex),
@@ -1089,18 +1160,24 @@ async function getAllNotesWithContent(opts?: BulkFetchOptions): Promise<NoteDeta
     for (const raw of notes) {
       allNotes.push(toNoteDetails(raw));
     }
+    skipped.push(...folderSkipped);
   }
 
-  debug(`Fetched ${allNotes.length} notes with content`);
+  debug(`Fetched ${allNotes.length} notes with content, ${skipped.length} skipped`);
 
-  return allNotes;
+  return { notes: allNotes, skipped };
 }
 
 /** Result type for getAllNotesWithFallback */
 export interface FallbackResult {
   /** Successfully fetched notes */
   notes: NoteDetails[];
-  /** List of skipped notes (folder/title format) that couldn't be read */
+  /**
+   * Notes or folders that couldn't be read, each in exactly one shape:
+   * `${folder}/${title}` (one known note), `${folder}/#${index}` (unknown
+   * note at that position in the folder) or `${folder}` (whole folder
+   * unread). Folder names may themselves contain `/`.
+   */
   skipped: string[];
 }
 
@@ -1129,9 +1206,9 @@ export async function getAllNotesWithFallback(
 
   // Strategy 1: Try batched fetch (fast path)
   try {
-    const notes = await getAllNotesWithContent(opts);
-    debug(`Batched fetch succeeded: ${notes.length} notes`);
-    return { notes, skipped: [] };
+    const fast = await getAllNotesWithContent(opts);
+    debug(`Batched fetch succeeded: ${fast.notes.length} notes, ${fast.skipped.length} skipped`);
+    return fast;
   } catch (singleCallError) {
     if (singleCallError instanceof IndexCancelledError) {
       throw singleCallError;
@@ -1183,13 +1260,16 @@ export async function getAllNotesWithFallback(
         }
         debug(`Listing note ids of folder "${folderName}" failed:`, listError);
       }
-      if (!listing) {
+      if (!listing || !Array.isArray(listing.ids)) {
         skipped.push(folderName);
         continue;
       }
 
+      const titles = Array.isArray(listing.names) ? listing.names : [];
       for (let i = 0; i < listing.ids.length; i++) {
-        const label = `${folderName}/${listing.names[i] ?? listing.ids[i]}`;
+        const title = titles[i];
+        const label =
+          typeof title === "string" && title.length > 0 ? `${folderName}/${title}` : `${folderName}/#${i}`;
         try {
           const note = await getNoteById(listing.ids[i], runOpts);
           if (note) {
@@ -1234,11 +1314,12 @@ export async function getAllFolders(opts?: JxaRunOptions): Promise<string[]> {
 
 /**
  * Get notes metadata from a specific folder (no content).
- * Fetched in small batched JXA calls without bodies. The folder lookup is
- * case-insensitive (pre-bulk-fetch behavior): results keep the original
- * Notes folder name.
+ * Fetched in small batched JXA calls without bodies. Accepts the same
+ * folder references as writes: a leaf name (case-insensitive, same-named
+ * folders aggregate), a nested `Parent/Child` path or `Account/Folder`.
+ * Results keep the original Notes folder name.
  *
- * @param folderName - The folder name
+ * @param folderName - Folder reference (leaf name, nested path or `Account/path`)
  * @param opts - Timeout and abort signal
  * @returns Array of note metadata from the specified folder
  */

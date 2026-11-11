@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { marked } from "marked";
 import { htmlToMarkdown } from "./conversion.js";
 
 const SAMPLE_TABLE_HTML = `<object><table cellspacing="0" cellpadding="0" style="border-collapse: collapse">
@@ -115,6 +116,45 @@ describe("htmlToMarkdown", () => {
         <tr><td><div>Price | Tax</div></td><td><div>A | B | C</div></td></tr>
       </tbody></table></object>`;
       expect(htmlToMarkdown(html)).toBe("| Name | Value |\n|---|---|\n| Price \\| Tax | A \\| B \\| C |");
+    });
+  });
+
+  describe("cell escaping", () => {
+    it("escapes Markdown in cells so it stays literal after rendering", () => {
+      const html = `<object><table><tbody>
+        <tr><td><div>H</div></td></tr>
+        <tr><td><div>2*3*4</div></td></tr>
+        <tr><td><div>__init__.py</div></td></tr>
+        <tr><td><div>\`code\`</div></td></tr>
+        <tr><td><div>[docs](http://x)</div></td></tr>
+      </tbody></table></object>`;
+      const markdown = htmlToMarkdown(html);
+
+      expect(markdown).toBe(
+        [
+          "| H |",
+          "|---|",
+          "| 2\\*3\\*4 |",
+          "| \\_\\_init\\_\\_.py |",
+          "| \\`code\\` |",
+          "| \\[docs\\](http://x) |",
+        ].join("\n")
+      );
+
+      // GFM autolinks the bare URL (as in body text); only the [docs](…) link must not form.
+      const rendered = marked.parse(markdown, { async: false });
+      for (const literal of ["2*3*4", "__init__.py", "`code`"]) {
+        expect(rendered).toContain(`<td>${literal}</td>`);
+      }
+      expect(rendered).toContain("<td>[docs](");
+      expect(rendered).not.toMatch(/<a [^>]*>docs<\/a>/);
+      expect(rendered).not.toMatch(/<(em|strong|code)\b/);
+    });
+  });
+
+  describe("wiki link followed by (", () => {
+    it("escapes [[x]](u) so it is not left as a raw wiki link", () => {
+      expect(htmlToMarkdown("<div>[[x]](u)</div>")).toBe("\\[\\[x\\]\\](u)");
     });
   });
 });

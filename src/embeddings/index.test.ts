@@ -68,6 +68,16 @@ describe("embeddings index", () => {
     expect(getLocalEmbedding).not.toHaveBeenCalled();
   });
 
+  it("uses the local provider when OPENROUTER_API_KEY is blank", async () => {
+    process.env.OPENROUTER_API_KEY = "  \t ";
+
+    await getEmbedding("blank key doc");
+
+    expect(getLocalEmbedding).toHaveBeenCalledWith("blank key doc", "passage");
+    expect(getOpenRouterEmbedding).not.toHaveBeenCalled();
+    expect(getProviderDescription()).toMatch(/^Local /);
+  });
+
   it("describes the active provider, model and dimensions", () => {
     expect(getProviderDescription()).toBe("Local (Xenova/multilingual-e5-small, 384 dims)");
     expect(getEmbeddingDimensions()).toBe(384);

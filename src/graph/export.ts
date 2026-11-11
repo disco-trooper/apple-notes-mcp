@@ -6,6 +6,7 @@
 import { getVectorStore } from "../db/lancedb.js";
 import { createDebugLogger } from "../utils/debug.js";
 import { GRAPH_LINK_WEIGHT, GRAPH_TAG_CLIQUE_MAX, GRAPH_TAG_WEIGHT } from "../config/constants.js";
+import { resolveLink } from "./extract.js";
 
 const debug = createDebugLogger("EXPORT");
 
@@ -82,7 +83,7 @@ export async function exportGraph(options: ExportOptions): Promise<GraphData | s
   for (const record of records) {
     for (const linkTitle of record.outlinks ?? []) {
       if (!linkTitle) continue;
-      const targetId = byTitle.get(linkTitle.toLowerCase());
+      const targetId = resolveLink(linkTitle, byTitle);
       if (targetId) addEdge("link", record.id, targetId, GRAPH_LINK_WEIGHT);
     }
   }

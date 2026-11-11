@@ -112,6 +112,21 @@ describe("searchChunks", () => {
     expect(results.map((r) => r.note_id)).toEqual(["a"]);
   });
 
+  it("over-fetches both rankings in hybrid mode", async () => {
+    const store = useStore([row("a", 0, 1)]);
+
+    await searchChunks("q", { limit: 20 });
+    expect(store.searchChunks).toHaveBeenCalledWith(expect.any(Array), 80);
+    expect(store.searchChunksFTS).toHaveBeenCalledWith("q", 80);
+
+    await searchChunks("q", { limit: 20, folder: "Work" });
+    expect(store.searchChunks).toHaveBeenLastCalledWith(expect.any(Array), 120);
+    expect(store.searchChunksFTS).toHaveBeenLastCalledWith("q", 120);
+
+    await searchChunks("q", { limit: 1 });
+    expect(store.searchChunks).toHaveBeenLastCalledWith(expect.any(Array), 80);
+  });
+
   it("surfaces full-text errors in keyword mode", async () => {
     useStore([], new Error("bad query syntax"));
 

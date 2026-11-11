@@ -50,6 +50,19 @@ describe("exportGraph", () => {
       expect(result.edges).toEqual([]);
     });
 
+    it("resolves [[C# cheatsheet]] by full title and [[Note#h]] by the title before #", async () => {
+      useRows([
+        { id: "1", title: "Source", outlinks: ["C# cheatsheet", "Note#h"] },
+        { id: "2", title: "C# cheatsheet" },
+        { id: "3", title: "C" },
+        { id: "4", title: "Note" },
+      ]);
+
+      const result = (await exportGraph({ format: "json" })) as GraphData;
+
+      expect(result.edges.filter((e) => e.type === "link").map((e) => e.target)).toEqual(["2", "4"]);
+    });
+
     it("keeps tag edges for distinct pairs whose ids contain '-'", async () => {
       useRows([
         { id: "a-b", title: "1", tags: ["t1"] },

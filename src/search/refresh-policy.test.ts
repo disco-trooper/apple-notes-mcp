@@ -23,7 +23,7 @@ describe("shouldAutoRefreshByTtl", () => {
     expect(shouldAutoRefreshByTtl(60, 1_060_000, 1_000_000)).toBe(true);
   });
 
-  it("returns true when nothing has been indexed yet", () => {
-    expect(shouldAutoRefreshByTtl(60, 2_000_000, null)).toBe(true);
+  it("never builds an index that does not exist yet", () => {
+    expect(shouldAutoRefreshByTtl(60, 2_000_000, null)).toBe(false);
   });
 });

@@ -7,7 +7,6 @@
  * (absolute filesystem paths, stack frames, programming errors).
  */
 
-import { ZodError } from "zod";
 import { ERROR_MESSAGE_MAX_LENGTH } from "../config/constants.js";
 import { DuplicateNoteError, NoteNotFoundError, ReadOnlyModeError } from "../errors/index.js";
 import { IndexCancelledError } from "../indexing/contracts.js";
@@ -36,21 +35,10 @@ const INTERNAL_ERROR_PATTERNS = [
   /\b(?:ENOENT|EACCES|EPERM|EISDIR|ENOTDIR):/,
 ];
 
-/** Format zod issues as "path: message", omitting the path for root-level issues. */
-export function formatZodIssues(error: ZodError): string {
-  return error.issues
-    .map((issue) => (issue.path.length > 0 ? `${issue.path.join(".")}: ${issue.message}` : issue.message))
-    .join(", ");
-}
-
 /**
  * Turn any thrown value into a message that is safe to send to the MCP client.
  */
 export function sanitizeErrorMessage(error: unknown): string {
-  if (error instanceof ZodError) {
-    return `Invalid arguments: ${formatZodIssues(error)}`;
-  }
-
   if (EXPOSED_ERROR_TYPES.some((type) => error instanceof type)) {
     return (error as Error).message;
   }

@@ -3,12 +3,14 @@
  *
  * When INDEX_TTL is set and has expired, runs an incremental indexNotes()
  * (which syncs both tables). Skipped while another index writer holds the
- * index lock. A search waits at most SEARCH_REFRESH_TIMEOUT_MS; a slower
+ * index lock, and when no index exists yet (index-notes builds it). The TTL
+ * baseline is the newest of: stored indexed_at, the last refresh started here,
+ * and the last completed index run in this process (which may change no rows). A search waits at most SEARCH_REFRESH_TIMEOUT_MS; a slower
  * refresh keeps running in the background under the lock.
  */
 
 import { getVectorStore } from "../db/lancedb.js";
-import { indexNotes } from "./indexer.js";
+import { getLastIndexCompletedAtMs, indexNotes } from "./indexer.js";
 import { isIndexLocked } from "../indexing/lock.js";
 import { createDebugLogger } from "../utils/debug.js";
 import { DEFAULT_SEARCH_REFRESH_TIMEOUT_MS } from "../config/constants.js";
@@ -20,12 +22,16 @@ let refreshInFlight: Promise<boolean> | null = null;
 /** When this process last started a refresh; avoids rescanning on every search. */
 let lastRefreshAtMs: number | null = null;
 
-async function getLatestIndexedAtMs(): Promise<number | null> {
+/**
+ * Newest indexed_at in the notes table.
+ * `undefined` means no index exists (no table or no rows).
+ */
+async function getLatestIndexedAtMs(): Promise<number | null | undefined> {
   const metadata = await getVectorStore()
     .getIndexMetadata()
-    .catch(() => null); // No index yet
-  if (!metadata) {
-    return null;
+    .catch(() => null); // No notes table yet
+  if (!metadata || metadata.length === 0) {
+    return undefined;
   }
 
   let latestMs: number | null = null;
@@ -36,6 +42,12 @@ async function getLatestIndexedAtMs(): Promise<number | null> {
     }
   }
   return latestMs;
+}
+
+function latestOf(a: number | null, b: number | null): number | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  return Math.max(a, b);
 }
 
 function getSearchRefreshTimeoutMs(): number {
@@ -67,15 +79,19 @@ async function runRefresh(ttlSeconds: number): Promise<boolean> {
   }
 
   const nowMs = Date.now();
-  if (lastRefreshAtMs !== null && !shouldAutoRefreshByTtl(ttlSeconds, nowMs, lastRefreshAtMs)) {
+  const processBaselineMs = latestOf(lastRefreshAtMs, getLastIndexCompletedAtMs());
+  if (processBaselineMs !== null && !shouldAutoRefreshByTtl(ttlSeconds, nowMs, processBaselineMs)) {
+    debug("Auto-refresh skipped by TTL policy");
     return false;
   }
 
   const latestIndexedAtMs = await getLatestIndexedAtMs();
-  const lastMs =
-    latestIndexedAtMs === null || lastRefreshAtMs === null
-      ? (latestIndexedAtMs ?? lastRefreshAtMs)
-      : Math.max(latestIndexedAtMs, lastRefreshAtMs);
+  if (latestIndexedAtMs === undefined) {
+    debug("No index yet; auto-refresh skipped (run index-notes)");
+    return false;
+  }
+  // An index whose age is unknown (no parseable indexed_at) counts as expired.
+  const lastMs = latestOf(latestIndexedAtMs, processBaselineMs) ?? 0;
   if (!shouldAutoRefreshByTtl(ttlSeconds, nowMs, lastMs)) {
     debug("Auto-refresh skipped by TTL policy");
     return false;

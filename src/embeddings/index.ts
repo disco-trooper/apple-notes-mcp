@@ -20,7 +20,7 @@ import { LRUCache } from "../utils/lru.js";
 const queryCache = new LRUCache<string, number[]>(EMBEDDING_CACHE_MAX_SIZE);
 
 function useOpenRouter(): boolean {
-  return Boolean(process.env.OPENROUTER_API_KEY);
+  return Boolean(process.env.OPENROUTER_API_KEY?.trim());
 }
 
 /**

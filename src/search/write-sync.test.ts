@@ -5,8 +5,15 @@ vi.mock("./indexer.js", () => ({
   removeNotesFromIndex: vi.fn(),
 }));
 
-import { syncAfterBatchDelete, syncAfterCreate, syncAfterUpdate } from "./write-sync.js";
+import {
+  QUEUED_SYNC_WARNING,
+  syncAfterBatchDelete,
+  syncAfterCreate,
+  syncAfterNoteChange,
+  syncAfterUpdate,
+} from "./write-sync.js";
 import { removeNotesFromIndex, syncNotesById } from "./indexer.js";
+import { withIndexLock } from "../indexing/lock.js";
 
 describe("write-sync", () => {
   beforeEach(() => {
@@ -50,5 +57,60 @@ describe("write-sync", () => {
 
     expect(removeNotesFromIndex).toHaveBeenCalledWith(["a", "b"]);
     expect(result).toEqual({ ok: false, warnings: ["index-delete: table locked"] });
+  });
+
+  it("queues the sync behind a running index job instead of waiting for it", async () => {
+    const synced: string[][] = [];
+    vi.mocked(syncNotesById).mockImplementation((ids) =>
+      withIndexLock(async () => {
+        synced.push(ids);
+        return [];
+      })
+    );
+    let release!: () => void;
+    const job = withIndexLock(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        })
+    );
+
+    const result = await syncAfterNoteChange("note-1");
+
+    expect(result).toEqual({ ok: true, warnings: [QUEUED_SYNC_WARNING] });
+    expect(synced).toEqual([]);
+
+    release();
+    await job;
+    await withIndexLock(async () => undefined);
+    expect(synced).toEqual([["note-1"]]);
+  });
+
+  it("never leaves a queued sync failure unobserved", async () => {
+    vi.mocked(removeNotesFromIndex).mockImplementation(() =>
+      withIndexLock(async () => {
+        throw new Error("table locked");
+      })
+    );
+    let release!: () => void;
+    const job = withIndexLock(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        })
+    );
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+
+    const result = await syncAfterBatchDelete(["a"]);
+    release();
+    await job;
+    await withIndexLock(async () => undefined).catch(() => undefined);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    process.off("unhandledRejection", unhandled);
+
+    expect(result.warnings).toEqual([QUEUED_SYNC_WARNING]);
+    expect(removeNotesFromIndex).toHaveBeenCalledWith(["a"]);
+    expect(unhandled).not.toHaveBeenCalled();
   });
 });

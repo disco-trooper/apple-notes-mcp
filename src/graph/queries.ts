@@ -14,6 +14,7 @@ import {
   GRAPH_SIMILAR_WEIGHT,
 } from "../config/constants.js";
 import type { SearchResult } from "../types/index.js";
+import { resolveLink } from "./extract.js";
 
 const debug = createDebugLogger("GRAPH");
 
@@ -165,7 +166,7 @@ export async function findRelatedNotes(
 
     for (const linkTitle of source.outlinks ?? []) {
       if (!linkTitle) continue;
-      const linked = byTitle.get(linkTitle.toLowerCase());
+      const linked = resolveLink(linkTitle, byTitle);
       if (linked && !seen.has(linked.id)) {
         results.push({
           id: linked.id,
@@ -179,13 +180,13 @@ export async function findRelatedNotes(
       }
     }
 
-    // Backlinks (notes that link to this note)
+    // Backlinks (notes whose links resolve to this note's title)
     const sourceTitle = source.title.toLowerCase();
     for (const record of allRecords) {
       if (seen.has(record.id)) continue;
 
       const linksToSource = (record.outlinks ?? []).some(
-        (l) => l && l.toLowerCase() === sourceTitle
+        (l) => l && resolveLink(l, byTitle)?.title.toLowerCase() === sourceTitle
       );
       if (linksToSource) {
         results.push({

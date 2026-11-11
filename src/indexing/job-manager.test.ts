@@ -58,7 +58,18 @@ describe("job-manager", () => {
 
     const final = manager.get(job.id);
     expect(final?.status).toBe("failed");
-    expect(final?.error).toBeTruthy();
+    expect(final?.error).toBe("boom");
+  });
+
+  it("hides programming errors from the job error message", async () => {
+    const manager = createIndexJobManager({
+      indexNotes: vi.fn().mockRejectedValue(new TypeError("Cannot read properties of undefined (reading 'id')")),
+    });
+
+    const { job } = manager.start({ mode: "incremental" });
+    await flushPromises();
+
+    expect(manager.get(job.id)?.error).toBe("An internal error occurred");
   });
 
   it("never reports progress going backwards", async () => {

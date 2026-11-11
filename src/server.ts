@@ -39,6 +39,7 @@ import {
 } from "./search/write-sync.js";
 import type { WriteSyncResult } from "./search/write-sync.js";
 import { getIndexJobManager } from "./indexing/job-manager.js";
+import type { IndexProgressEvent } from "./indexing/contracts.js";
 import { withIndexLock, isIndexLocked } from "./indexing/lock.js";
 import { listTags, searchByTag, findRelatedNotes } from "./graph/queries.js";
 import { exportGraph } from "./graph/export.js";
@@ -102,7 +103,12 @@ async function guard(handler: () => Promise<CallToolResult>): Promise<CallToolRe
 }
 
 function syncWarning(result: WriteSyncResult): string {
-  return result.warnings.length > 0 ? ` (index sync warning: ${result.warnings.join("; ")})` : "";
+  if (result.warnings.length === 0) {
+    return "";
+  }
+  // ok with warnings = the sync was queued behind a running index job.
+  const label = result.ok ? "" : "index sync warning: ";
+  return ` (${label}${result.warnings.join("; ")})`;
 }
 
 async function requireNote(title: string): Promise<NoteDetails> {
@@ -213,7 +219,9 @@ function registerSearchAndIndexTools(server: McpServer): void {
     "index-notes",
     {
       title: "Index notes",
-      description: "Index all notes for semantic search. Use mode='incremental' (default) to only process changed notes.",
+      description:
+        "Index all notes for semantic search. Use mode='incremental' (default) to only process changed notes. " +
+        "For large libraries use background: true and poll get-index-job; a foreground run can outlast the client's request timeout.",
       inputSchema: {
         mode: indexMode.default("incremental").describe("full = reindex everything, incremental = only changes (default)"),
         background: z.boolean().default(false).describe("Run as a background job and return its id (default: false)"),
@@ -234,7 +242,25 @@ function registerSearchAndIndexTools(server: McpServer): void {
           });
         }
 
-        const result = await indexNotes(mode, { signal: extra.signal });
+        const progressToken = extra._meta?.progressToken;
+        let progress = 0;
+        const onProgress =
+          progressToken === undefined
+            ? undefined
+            : (event: IndexProgressEvent): void => {
+                progress += 1;
+                extra
+                  .sendNotification({
+                    method: "notifications/progress",
+                    params: {
+                      progressToken,
+                      progress,
+                      message: `${event.stage} ${event.current}/${event.total}: ${event.message}`,
+                    },
+                  })
+                  .catch((error: unknown) => debug("Progress notification failed:", error));
+              };
+        const result = await indexNotes(mode, { signal: extra.signal, onProgress });
         return textResponse(formatIndexResult(result));
       })
   );
@@ -556,7 +582,8 @@ function registerWriteTools(server: McpServer): void {
           return textResponse(`Updated note: "${location}"${renamed}`);
         }
         const sync = await syncAfterUpdate(result);
-        return textResponse(`Updated and reindexed note: "${location}"${renamed}${syncWarning(sync)}`);
+        const verb = sync.warnings.length === 0 ? "Updated and reindexed" : "Updated";
+        return textResponse(`${verb} note: "${location}"${renamed}${syncWarning(sync)}`);
       })
   );
 

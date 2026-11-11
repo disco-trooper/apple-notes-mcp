@@ -213,7 +213,7 @@ export function createIndexJobManager(
       if (controller.signal.aborted || isIndexCancelledError(error)) {
         finish(job, "cancelled", "Index job cancelled");
       } else {
-        job.error = sanitizeErrorMessage(error instanceof Error ? error.message : String(error));
+        job.error = sanitizeErrorMessage(error);
         finish(job, "failed", "Index job failed");
         debug("Background index job failed:", error);
       }

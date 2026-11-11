@@ -181,7 +181,7 @@ describe("bulk fetch JXA strategy", () => {
     expect(result.notes[0].content).toContain("Content");
   });
 
-  it("survives a failing batch: other batches still resolve", async () => {
+  it("survives a failing batch: other batches still resolve and skips propagate from the fast path", async () => {
     mockBulkFetch(makeRawNotes(5), { failStart: 2 });
     const result = await getAllNotesWithFallback({ batchSize: 2 });
     expect(result.notes).toHaveLength(3);
@@ -189,7 +189,9 @@ describe("bulk fetch JXA strategy", () => {
     expect(titles).toEqual(expect.arrayContaining(["Note 0", "Note 1", "Note 4"]));
     expect(titles).not.toContain("Note 2");
     expect(titles).not.toContain("Note 3");
-    expect(Array.isArray(result.skipped)).toBe(true);
+    // Metadata recovery failed too, so titles are unknown: index labels.
+    // The fast path must report them (it used to return skipped: []).
+    expect(result.skipped).toEqual(["Work/#2", "Work/#3"]);
   });
 
   it("retries a failed batch by id, so duplicate titles stay distinct notes", async () => {
@@ -241,6 +243,77 @@ describe("bulk fetch JXA strategy", () => {
       (s) => s.includes(".notes.length") && !s.includes("folders.name()") && !s.includes("targetIdx")
     );
     expect(countCalls.length).toBeGreaterThan(0);
+  });
+});
+
+describe("skip labels", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("fast path labels unreadable notes with recovered titles as folder/title", async () => {
+    const allRaw = makeRawNotes(4);
+    vi.mocked(executeJxa).mockReset();
+    vi.mocked(executeJxa).mockImplementation(async (...args: Parameters<typeof executeJxa>) => {
+      const src = String(args[0]);
+      if (src.includes("folders.name()")) {
+        return JSON.stringify({ names: ["Work"], counts: [allRaw.length] });
+      }
+      if (src.includes(".slice(")) {
+        const start = Number(src.match(/const startIdx = (\d+);/)?.[1]);
+        const end = Number(src.match(/const endIdx = (\d+);/)?.[1]);
+        if (start === 2 && src.includes("notes.body()")) {
+          throw new Error("Simulated body batch failure");
+        }
+        return JSON.stringify(allRaw.slice(start, end));
+      }
+      if (src.includes("const targetId")) {
+        throw new Error("Simulated retry failure");
+      }
+      throw new Error(`unexpected JXA call: ${src.slice(0, 160)}`);
+    });
+
+    const result = await getAllNotesWithFallback({ batchSize: 2 });
+    expect(result.notes.map((n) => n.id)).toEqual(["id-0", "id-1"]);
+    expect(result.skipped).toEqual(["Work/Note 2", "Work/Note 3"]);
+  });
+
+  it("note-by-note fallback never labels a skip with a bare id", async () => {
+    vi.mocked(executeJxa).mockReset();
+    vi.mocked(executeJxa).mockImplementation(async (...args: Parameters<typeof executeJxa>) => {
+      const src = String(args[0]);
+      if (src.includes("folders.name()")) {
+        // No per-folder counts: every folder fetch needs a count call.
+        return JSON.stringify({ names: ["Work"], count: 1 });
+      }
+      if (src.includes("const targetId")) {
+        return JSON.stringify(null);
+      }
+      if (src.includes("names: folder.notes.name()")) {
+        // Second title unreadable: only the id is known.
+        return JSON.stringify({ ids: ["x-1", "x-2"], names: ["Title A", ""] });
+      }
+      // Count calls fail, forcing Strategy 3 (note-by-note by id).
+      throw new Error("Simulated count failure");
+    });
+
+    const result = await getAllNotesWithFallback({ batchSize: 2 });
+    expect(result.notes).toEqual([]);
+    expect(result.skipped).toEqual(["Work/Title A", "Work/#1"]);
+  });
+
+  it("labels a folder whose note ids cannot be listed with the bare folder name", async () => {
+    vi.mocked(executeJxa).mockReset();
+    vi.mocked(executeJxa).mockImplementation(async (...args: Parameters<typeof executeJxa>) => {
+      const src = String(args[0]);
+      if (src.includes("folders.name()")) {
+        return JSON.stringify({ names: ["Work"], count: 1 });
+      }
+      throw new Error("Simulated failure");
+    });
+
+    const result = await getAllNotesWithFallback({ batchSize: 2 });
+    expect(result.skipped).toEqual(["Work"]);
   });
 });
 

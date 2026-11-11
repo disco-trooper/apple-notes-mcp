@@ -42,8 +42,13 @@ const db = vi.hoisted(() => {
     rows: ChunkRecord[] = [];
     async getNoteMetadata() {
       if (!this.exists) throw new Error("Chunk index not found. Run index-notes first.");
-      const byNote = new Map(this.rows.map((r) => [r.note_id, r.modified]));
-      return [...byNote].map(([note_id, modified]) => ({ note_id, modified }));
+      const byNote = new Map(
+        this.rows.map((r) => [
+          r.note_id,
+          { note_id: r.note_id, note_title: r.note_title, folder: r.folder, modified: r.modified },
+        ])
+      );
+      return [...byNote.values()];
     }
     async getContentVectors(noteIds?: string[]) {
       if (!this.exists) throw new Error("Chunk index not found. Run index-notes first.");
@@ -109,7 +114,7 @@ vi.mock("../embeddings/index.js", () => ({
   getProviderDescription: () => db.provider,
 }));
 
-import { indexNotes, reindexNote, syncNotesById } from "./indexer.js";
+import { indexNotes, reindexNote, syncNotesById, getLastIndexCompletedAtMs } from "./indexer.js";
 import { getAllNotesWithFallback, getNoteById, getNoteByTitle } from "../notes/read.js";
 import { getEmbeddingBatch } from "../embeddings/index.js";
 import { assertIndexCompatible } from "../db/lancedb.js";
@@ -300,6 +305,86 @@ describe("indexNotes incremental", () => {
 
     expect(db.notes.rows.has("b")).toBe(true);
     expect(chunkContents("b")).toEqual(["beta"]);
+  });
+
+  it("keeps every row of a folder skipped as a whole, in both tables", async () => {
+    library([
+      makeNote("a", "A", "alpha", undefined, "Q1/Plans"),
+      makeNote("b", "B", "beta", undefined, "Q1/Plans"),
+      makeNote("c", "C", "gamma", undefined, "Home"),
+      makeNote("d", "D", "delta", undefined, "Home"),
+    ]);
+    await indexNotes("full");
+
+    library([makeNote("c", "C", "gamma", undefined, "Home")], ["Q1/Plans"]);
+    await indexNotes("incremental");
+
+    expect([...db.notes.rows.keys()].sort()).toEqual(["a", "b", "c"]);
+    expect(chunkContents("a")).toEqual(["alpha"]);
+    expect(chunkContents("b")).toEqual(["beta"]);
+    expect(chunkContents("d")).toEqual([]);
+  });
+
+  it("keeps every row of a folder with an unidentified skipped note, in both tables", async () => {
+    library([
+      makeNote("a", "A", "alpha"),
+      makeNote("b", "B", "beta"),
+      makeNote("c", "C", "gamma", undefined, "Home"),
+    ]);
+    await indexNotes("full");
+
+    library([makeNote("a", "A", "alpha")], ["Work/#1"]);
+    await indexNotes("incremental");
+
+    expect(db.notes.rows.has("b")).toBe(true);
+    expect(chunkContents("b")).toEqual(["beta"]);
+    expect(db.notes.rows.has("c")).toBe(false);
+    expect(chunkContents("c")).toEqual([]);
+  });
+
+  it("keeps skipped notes from chunk metadata when the notes table is missing", async () => {
+    library([makeNote("a", "A", "alpha"), makeNote("b", "B", "beta")]);
+    await indexNotes("full");
+    await db.notes.clear();
+
+    library([makeNote("a", "A", "alpha")], ["Work"]);
+    await indexNotes("incremental");
+
+    expect(chunkContents("b")).toEqual(["beta"]);
+  });
+
+  it("rewrites a note moved to another folder in both tables without embedding", async () => {
+    library([makeNote("a", "A", "alpha"), makeNote("b", "B", "beta")]);
+    await indexNotes("full");
+    const vectorBefore = db.notes.rows.get("a")?.vector;
+
+    library([makeNote("a", "A", "alpha", undefined, "Archive"), makeNote("b", "B", "beta")]);
+    vi.mocked(getEmbeddingBatch).mockClear();
+    const result = await indexNotes("incremental");
+
+    expect(getEmbeddingBatch).not.toHaveBeenCalled();
+    expect(db.notes.rows.get("a")?.folder).toBe("Archive");
+    expect(db.notes.rows.get("a")?.vector).toEqual(vectorBefore);
+    expect(db.chunks.rows.filter((r) => r.note_id === "a").map((r) => r.folder)).toEqual(["Archive"]);
+    expect(result.breakdown).toMatchObject({ updated: 1, added: 0, deleted: 0 });
+  });
+
+  it("records completion time after a run that changed nothing", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      library([makeNote("a", "A", "alpha")]);
+      vi.setSystemTime(1_000_000);
+      await indexNotes("full");
+      expect(getLastIndexCompletedAtMs()).toBe(1_000_000);
+
+      vi.setSystemTime(2_000_000);
+      const result = await indexNotes("incremental");
+
+      expect(result.indexed).toBe(0);
+      expect(getLastIndexCompletedAtMs()).toBe(2_000_000);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("rebuilds a missing notes table from reused chunk vectors", async () => {

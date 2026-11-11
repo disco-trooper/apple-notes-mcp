@@ -58,6 +58,15 @@ function constLiteral(script: string, name: string): unknown {
   return JSON.parse(match[1]);
 }
 
+/** Value of `const <name> = <JSON array literal>;` in a generated script. */
+function constLiteralJson(script: string, name: string): unknown {
+  const match = script.match(new RegExp(`const ${name} = (\\[.*?\\]);`));
+  if (!match) {
+    throw new Error(`const ${name} not found in script`);
+  }
+  return JSON.parse(match[1]);
+}
+
 const DUPLICATE_RESOLUTION = {
   success: false,
   error: "Multiple notes found",
@@ -76,6 +85,7 @@ beforeEach(() => {
 
 afterEach(() => {
   delete process.env.READONLY_MODE;
+  delete process.env.NOTES_FETCH_BATCH_SIZE;
 });
 
 describe("checkReadOnly", () => {
@@ -189,6 +199,27 @@ describe("createNote", () => {
       expect(constLiteral(scriptOf(0), "content")).toBe("<p>milk</p>");
     }
   );
+
+  it.each(["Groceries\n=========\nmilk", "Groceries\n---\n\nmilk", "Groceries\n   ==  \nmilk"])(
+    "drops a setext title together with its underline (%j)",
+    async (content) => {
+      vi.mocked(executeJxa).mockResolvedValueOnce(
+        JSON.stringify({ id: "n", title: "Groceries", folder: "Notes" })
+      );
+
+      await createNote("Groceries", content);
+
+      expect(constLiteral(scriptOf(0), "content")).toBe("<p>milk</p>");
+    }
+  );
+
+  it("keeps a horizontal rule that follows an ATX title", async () => {
+    vi.mocked(executeJxa).mockResolvedValueOnce(JSON.stringify({ id: "n", title: "Groceries", folder: "Notes" }));
+
+    await createNote("Groceries", "# Groceries\n---\nmilk");
+
+    expect(constLiteral(scriptOf(0), "content")).toBe("<p>---\nmilk</p>");
+  });
 
   it("keeps a first line that only starts like the title", async () => {
     vi.mocked(executeJxa).mockResolvedValueOnce(JSON.stringify({ id: "n", title: "Groceries", folder: "Notes" }));
@@ -332,6 +363,20 @@ describe("editTable", () => {
     expect(write.indexOf("modificationDate()")).toBeLessThan(write.indexOf("note.body ="));
   });
 
+  it("should also guard the write by the read-time body, since dates have second precision", async () => {
+    resolvesTo();
+    vi.mocked(executeJxa)
+      .mockResolvedValueOnce(JSON.stringify({ html: "<table>old \"q\"</table>", modified: "2026-01-01T00:00:00.000Z" }))
+      .mockResolvedValueOnce(JSON.stringify({ title: "Test", folder: "Work" }));
+    vi.mocked(applyTableEdits).mockReturnValueOnce("<table>new</table>");
+
+    await editTable("Test", 0, edits);
+
+    const write = scriptOf(1);
+    expect(write).toContain(`note.body() !== ${JSON.stringify("<table>old \"q\"</table>")}`);
+    expect(write.indexOf("note.body() !==")).toBeLessThan(write.indexOf("note.body ="));
+  });
+
   it("should surface a concurrent modification instead of overwriting", async () => {
     resolvesTo();
     vi.mocked(executeJxa)
@@ -354,22 +399,33 @@ describe("batchDelete", () => {
     await expect(batchDelete({})).rejects.toThrow("Specify either titles or folder");
   });
 
-  it("should return the deleted notes and per-note failures of a folder", async () => {
-    vi.mocked(executeJxa).mockResolvedValueOnce(
-      JSON.stringify({
-        deleted: [{ id: "a", title: "A", folder: "Old" }],
-        failed: ["Locked"],
-      })
-    );
+  it("should list a folder once, then delete by id in groups and keep finished groups", async () => {
+    process.env.NOTES_FETCH_BATCH_SIZE = "2";
+    vi.mocked(executeJxa)
+      .mockResolvedValueOnce(
+        JSON.stringify({ folderName: "Old", ids: ["a", "b", "c", "d", "e"], names: ["A", "B", "", "D", "E"] })
+      )
+      .mockResolvedValueOnce(
+        JSON.stringify({ deleted: [{ id: "a", title: "A", folder: "Old" }], failed: ["B"] })
+      )
+      .mockRejectedValueOnce(new Error("JXA timed out"))
+      .mockResolvedValueOnce(JSON.stringify({ deleted: [{ id: "e", title: "E", folder: "Old" }], failed: [] }));
 
     await expect(batchDelete({ folder: "Old" })).resolves.toEqual({
-      deleted: [{ id: "a", title: "A", folder: "Old" }],
-      failed: ["Locked"],
+      deleted: [
+        { id: "a", title: "A", folder: "Old" },
+        { id: "e", title: "E", folder: "Old" },
+      ],
+      failed: ["B", "c", "D"],
     });
-    // Ids are captured before deleting, then each note is deleted by id.
-    const script = scriptOf(0);
-    expect(script).toContain("folder.notes.id()");
-    expect(script).toContain("app.notes.byId(ids[i]).delete()");
+
+    expect(executeJxa).toHaveBeenCalledTimes(4);
+    expect(scriptOf(0)).toContain(`findFolder("Old", 'Folder')`);
+    expect(scriptOf(0)).toContain("folder.notes.id()");
+    expect(constLiteralJson(scriptOf(1), "ids")).toEqual(["a", "b"]);
+    expect(constLiteralJson(scriptOf(2), "ids")).toEqual(["c", "d"]);
+    expect(constLiteralJson(scriptOf(3), "ids")).toEqual(["e"]);
+    expect(scriptOf(3)).toContain("app.notes.byId(ids[i]).delete()");
   });
 
   it("should delete individual notes by title and track failures", async () => {
@@ -404,30 +460,73 @@ describe("batchMove", () => {
     );
   });
 
-  it("should return the moved notes of a folder with source and target", async () => {
-    const moved = [{ id: "a", title: "A", folder: "Archive", fromFolder: "Temp" }];
-    vi.mocked(executeJxa).mockResolvedValueOnce(JSON.stringify({ moved, failed: [] }));
+  it("should resolve both folders once, then move by id in groups and keep finished groups", async () => {
+    process.env.NOTES_FETCH_BATCH_SIZE = "1";
+    const first = { id: "a", title: "A", folder: "Archive", fromFolder: "Temp" };
+    vi.mocked(executeJxa)
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          sourceName: "Temp",
+          targetId: "folder-9",
+          targetName: "Archive",
+          ids: ["a", "b"],
+          names: ["A", "B"],
+        })
+      )
+      .mockResolvedValueOnce(JSON.stringify({ moved: [first], failed: [] }))
+      .mockRejectedValueOnce(new Error("JXA timed out"));
 
     await expect(batchMove({ sourceFolder: "Temp", targetFolder: "Archive" })).resolves.toEqual({
-      moved,
-      failed: [],
+      moved: [first],
+      failed: ["B"],
     });
-    const script = scriptOf(0);
-    expect(script).toContain(`findFolder("Temp", 'Source folder')`);
-    expect(script).toContain(`findFolder("Archive", 'Target folder')`);
+
+    expect(executeJxa).toHaveBeenCalledTimes(3);
+    expect(scriptOf(0)).toContain(`findFolder("Temp", 'Source folder')`);
+    expect(scriptOf(0)).toContain(`findFolder("Archive", 'Target folder')`);
+    for (const call of [1, 2]) {
+      expect(scriptOf(call)).not.toContain("findFolder(");
+      expect(scriptOf(call)).toContain(`app.folders.byId("folder-9")`);
+    }
+    expect(constLiteralJson(scriptOf(2), "ids")).toEqual(["b"]);
   });
 
-  it("should move individual notes by title and track failures", async () => {
+  it("should move individual notes by title to the folder resolved once, and track failures", async () => {
     vi.mocked(resolveNoteTitle)
       .mockResolvedValueOnce({ success: true, note: { id: "1", title: "Note 1", folder: "Work" } })
-      .mockResolvedValueOnce({ success: false, error: "Note not found" });
-    vi.mocked(executeJxa).mockResolvedValue(JSON.stringify({ toFolder: "Archive" }));
+      .mockResolvedValueOnce({ success: false, error: "Note not found" })
+      .mockResolvedValueOnce({ success: true, note: { id: "2", title: "Note 2", folder: "Home" } });
+    vi.mocked(executeJxa)
+      .mockResolvedValueOnce(JSON.stringify({ targetId: "folder-9" }))
+      .mockResolvedValue(JSON.stringify({ toFolder: "Archive" }));
 
     await expect(
-      batchMove({ titles: ["Note 1", "Missing Note"], targetFolder: "Archive" })
+      batchMove({ titles: ["Note 1", "Missing Note", "Note 2"], targetFolder: "Archive" })
     ).resolves.toEqual({
-      moved: [{ id: "1", title: "Note 1", folder: "Archive", fromFolder: "Work" }],
+      moved: [
+        { id: "1", title: "Note 1", folder: "Archive", fromFolder: "Work" },
+        { id: "2", title: "Note 2", folder: "Archive", fromFolder: "Home" },
+      ],
       failed: ["Missing Note"],
     });
+
+    expect(executeJxa).toHaveBeenCalledTimes(3);
+    expect(scriptOf(0)).toContain(`findFolder("Archive", 'Target folder')`);
+    for (const call of [1, 2]) {
+      expect(scriptOf(call)).toContain(`const targetFolder = app.folders.byId("folder-9");`);
+      expect(scriptOf(call)).not.toContain(`findFolder("Archive"`);
+    }
+  });
+
+  it("should throw a missing or ambiguous target folder before moving anything", async () => {
+    vi.mocked(executeJxa).mockRejectedValueOnce(
+      new Error('JXA execution failed: Multiple folders match "Archive": iCloud/Archive, On My Mac/Archive.')
+    );
+
+    await expect(batchMove({ titles: ["Note 1", "Note 2"], targetFolder: "Archive" })).rejects.toThrow(
+      "iCloud/Archive, On My Mac/Archive"
+    );
+    expect(executeJxa).toHaveBeenCalledTimes(1);
+    expect(resolveNoteTitle).not.toHaveBeenCalled();
   });
 });

@@ -116,9 +116,12 @@ export async function searchChunks(
   } else if (mode === "semantic") {
     rows = await vectorSearch(trimmedQuery, fetchLimit);
   } else {
+    // Each ranking feeds RRF on its own, so give both the full over-fetch budget
+    // twice over: fusion, folder filtering and per-note dedupe all drop rows.
+    const hybridFetchLimit = Math.max(fetchLimit * 2, HYBRID_SEARCH_MIN_FETCH);
     const [vectorRows, ftsRows] = await Promise.all([
-      vectorSearch(trimmedQuery, fetchLimit),
-      store.searchChunksFTS(trimmedQuery, fetchLimit).catch((error: unknown) => {
+      vectorSearch(trimmedQuery, hybridFetchLimit),
+      store.searchChunksFTS(trimmedQuery, hybridFetchLimit).catch((error: unknown) => {
         debug("Full-text search failed; using vector results only:", error);
         return [];
       }),

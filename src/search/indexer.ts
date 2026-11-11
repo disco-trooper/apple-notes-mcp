@@ -6,12 +6,13 @@
  *
  * indexNotes() is the single entry point that syncs both tables from one
  * fetch of the library. Rows are keyed by the Apple Notes id; a note is
- * rewritten when its `modified` differs from the stored `modified`.
+ * rewritten when its `modified` or `folder` differs from the stored row.
  * Every write runs under the in-process index lock.
  *
  * Only chunks are embedded. A note's vector is the normalized mean of its
  * chunk vectors, and chunk vectors stored by the same model are reused for
- * identical chunk text instead of being embedded again.
+ * identical chunk text instead of being embedded again (so a note that only
+ * moved folders is rewritten without embedding).
  */
 
 import { getEmbeddingBatch, getEmbeddingDimensions, getProviderDescription } from "../embeddings/index.js";
@@ -23,7 +24,6 @@ import {
   recordIndexModel,
   type NoteRecord,
   type ChunkRecord,
-  type IndexMetadataRecord,
 } from "../db/lancedb.js";
 import {
   getAllNotesWithFallback,
@@ -43,6 +43,17 @@ import { withIndexLock } from "../indexing/lock.js";
 import { chunkNote, prepareNote, type PreparedNote, type UnembeddedChunk } from "./chunk-indexer.js";
 
 const debug = createDebugLogger("INDEX");
+
+/** Date.now() of the last successful indexNotes run in this process. */
+let lastIndexCompletedAtMs: number | null = null;
+
+/**
+ * When the last successful indexNotes run (any mode, also one that changed
+ * nothing) finished; null before the first run in this process.
+ */
+export function getLastIndexCompletedAtMs(): number | null {
+  return lastIndexCompletedAtMs;
+}
 
 /**
  * Result of an indexing operation.
@@ -91,13 +102,21 @@ function emitProgress(
   options.onProgress?.({ stage, current, total, message });
 }
 
+/** What a table stores about one note. */
+interface StoredNote {
+  id: string;
+  title: string;
+  folder: string;
+  modified: string;
+}
+
 /**
- * Diff stored rows (id -> modified) against the current notes.
- * `existing === null` means the table is missing.
+ * Diff stored rows against the current notes. A note is rewritten when its
+ * `modified` or `folder` changed. `existing === null` means the table is missing.
  * `keep` holds ids that must not be deleted (notes that failed to fetch).
  */
 function planTable(
-  existing: Map<string, string> | null,
+  existing: Map<string, StoredNote> | null,
   notes: NoteDetails[],
   keep: Set<string>
 ): TablePlan {
@@ -109,7 +128,8 @@ function planTable(
   const write: NoteDetails[] = [];
   for (const note of notes) {
     current.add(note.id);
-    if (existing.get(note.id) !== note.modified) {
+    const stored = existing.get(note.id);
+    if (!stored || stored.modified !== note.modified || stored.folder !== note.folder) {
       write.push(note);
     }
   }
@@ -241,18 +261,35 @@ function chunkRecordsFor(notes: ChunkedNote[], byContent: Map<string, number[]>,
   );
 }
 
+/** `${folder}/#${index}`: an unknown note of that folder could not be read. */
+const INDEX_SKIP_LABEL = /^(.*)\/#\d+$/;
+
 /**
- * Ids of indexed notes that could not be fetched this run (locked, syncing).
- * Their rows are kept instead of being treated as deleted.
+ * Ids of indexed notes that could not be fetched this run (locked, syncing,
+ * unreadable folder). Their rows are kept instead of being treated as deleted.
+ *
+ * Skip labels are `${folder}/${title}` (one note), `${folder}/#${index}`
+ * (unknown note: keep the whole folder) or `${folder}` (whole folder unread).
+ * Folder names may contain `/`, so a label is matched against each stored
+ * row instead of being split.
  */
-function idsOfSkippedNotes(metadata: IndexMetadataRecord[] | null, skipped: string[]): Set<string> {
-  if (!metadata || skipped.length === 0) {
-    return new Set();
+function idsOfSkippedNotes(stored: Iterable<StoredNote>, skipped: string[]): Set<string> {
+  const keep = new Set<string>();
+  if (skipped.length === 0) return keep;
+
+  const labels = new Set(skipped);
+  const keptFolders = new Set<string>();
+  for (const label of skipped) {
+    const match = INDEX_SKIP_LABEL.exec(label);
+    if (match) keptFolders.add(match[1]);
   }
-  const skippedKeys = new Set(skipped);
-  return new Set(
-    metadata.filter((r) => skippedKeys.has(`${r.folder}/${r.title}`)).map((r) => r.id)
-  );
+
+  for (const row of stored) {
+    if (labels.has(row.folder) || keptFolders.has(row.folder) || labels.has(`${row.folder}/${row.title}`)) {
+      keep.add(row.id);
+    }
+  }
+  return keep;
 }
 
 async function runIndex(
@@ -267,24 +304,32 @@ async function runIndex(
   const chunkStore = getChunkStore();
 
   // Stored state per table; null = table missing (rebuilt from scratch).
-  let noteMetadata: IndexMetadataRecord[] | null = null;
-  let chunkMetadata: Map<string, string> | null = null;
+  let noteStored: Map<string, StoredNote> | null = null;
+  let chunkStored: Map<string, StoredNote> | null = null;
   if (mode === "incremental") {
-    noteMetadata = await noteStore.getIndexMetadata().catch((error: unknown) => {
-      debug("Notes table unavailable, rebuilding it:", error);
-      return null;
-    });
-    chunkMetadata = await chunkStore
+    noteStored = await noteStore
+      .getIndexMetadata()
+      .then((rows) => new Map(rows.map((r): [string, StoredNote] => [r.id, r])))
+      .catch((error: unknown) => {
+        debug("Notes table unavailable, rebuilding it:", error);
+        return null;
+      });
+    chunkStored = await chunkStore
       .getNoteMetadata()
-      .then((rows) => new Map(rows.map((r): [string, string] => [r.note_id, r.modified])))
+      .then(
+        (rows) =>
+          new Map(
+            rows.map((r): [string, StoredNote] => [
+              r.note_id,
+              { id: r.note_id, title: r.note_title, folder: r.folder, modified: r.modified },
+            ])
+          )
+      )
       .catch((error: unknown) => {
         debug("Chunks table unavailable, rebuilding it:", error);
         return null;
       });
   }
-  const noteModified = noteMetadata
-    ? new Map(noteMetadata.map((r): [string, string] => [r.id, r.modified]))
-    : null;
 
   // Phase 1: fetch the library once for both tables.
   emitProgress(options, "fetch", 0, 1, "Fetching notes");
@@ -298,9 +343,13 @@ async function runIndex(
   throwIfCancelled(options.signal);
 
   // Phase 2: diff each table, then prepare and chunk each note either table rewrites.
-  const keep = idsOfSkippedNotes(noteMetadata, skipped);
-  const notesPlan = planTable(noteModified, notes, keep);
-  const chunksPlan = planTable(chunkMetadata, notes, keep);
+  // Skipped notes are matched against whichever table metadata exists.
+  const keep = idsOfSkippedNotes(
+    [...(noteStored?.values() ?? []), ...(chunkStored?.values() ?? [])],
+    skipped
+  );
+  const notesPlan = planTable(noteStored, notes, keep);
+  const chunksPlan = planTable(chunkStored, notes, keep);
 
   // Note vectors are derived from chunk vectors, so note rows need chunks too.
   const chunked = new Map<string, ChunkedNote | null>();
@@ -313,7 +362,7 @@ async function runIndex(
     const entry = chunked.get(note.id);
     if (entry) {
       noteWrites.push(entry);
-    } else if (noteModified?.has(note.id)) {
+    } else if (noteStored?.has(note.id)) {
       // Content became empty/unindexable: drop the old row.
       notesPlan.remove.push(note.id);
     }
@@ -326,7 +375,7 @@ async function runIndex(
     ? []
     : [
         ...chunksPlan.remove,
-        ...chunksPlan.write.map((n) => n.id).filter((id) => chunkMetadata?.has(id)),
+        ...chunksPlan.write.map((n) => n.id).filter((id) => chunkStored?.has(id)),
       ];
   const allChunks = [...chunked.values()].flatMap((entry) => entry?.chunks ?? []);
 
@@ -345,7 +394,7 @@ async function runIndex(
     () =>
       mode === "full"
         ? chunkStore.getContentVectors()
-        : chunkStore.getContentVectors([...chunked.keys()].filter((id) => chunkMetadata?.has(id))),
+        : chunkStore.getContentVectors([...chunked.keys()].filter((id) => chunkStored?.has(id))),
     options
   );
   throwIfCancelled(options.signal);
@@ -400,14 +449,15 @@ async function runIndex(
     await recordIndexModel(description, dims);
   }
 
-  const timeMs = Date.now() - startTime;
+  lastIndexCompletedAtMs = Date.now();
+  const timeMs = lastIndexCompletedAtMs - startTime;
   debug(
     `${mode} index complete: ${noteRecords.length} notes, ${chunkRecords.length} chunks ` +
       `(embedded ${embedded}, reused ${reused}), ${timeMs}ms`
   );
   emitProgress(options, "done", 1, 1, `${mode === "full" ? "Full" : "Incremental"} index completed`);
 
-  const added = noteRecords.filter((r) => !noteModified?.has(r.id)).length;
+  const added = noteRecords.filter((r) => !noteStored?.has(r.id)).length;
   return {
     total: notes.length + skipped.length,
     indexed: noteRecords.length,

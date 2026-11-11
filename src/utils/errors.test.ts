@@ -1,6 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { z } from "zod";
-import { sanitizeErrorMessage, formatZodIssues } from "./errors.js";
+import { sanitizeErrorMessage } from "./errors.js";
 import { DuplicateNoteError, NoteNotFoundError, ReadOnlyModeError } from "../errors/index.js";
 import { IndexCancelledError } from "../indexing/contracts.js";
 
@@ -16,19 +15,6 @@ describe("sanitizeErrorMessage", () => {
     expect(sanitizeErrorMessage(new NoteNotFoundError("x"))).toBe('Note not found: "x"');
     expect(sanitizeErrorMessage(new ReadOnlyModeError())).toBe("Operation disabled in read-only mode");
     expect(sanitizeErrorMessage(new IndexCancelledError())).toBe("Indexing cancelled");
-  });
-
-  it("formats zod validation errors without a leading separator for root issues", () => {
-    const schema = z.object({ row: z.number().int() });
-    const result = schema.safeParse({ row: 1.5 });
-    expect(result.success).toBe(false);
-    if (!result.success) {
-      expect(formatZodIssues(result.error)).toBe("row: Expected integer, received float");
-    }
-    const root = z.object({}).refine(() => false, { message: "Specify either A or B" }).safeParse({});
-    if (!root.success) {
-      expect(sanitizeErrorMessage(root.error)).toBe("Invalid arguments: Specify either A or B");
-    }
   });
 
   it("keeps the full multi-line environment validation message", () => {

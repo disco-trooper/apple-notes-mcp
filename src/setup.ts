@@ -378,6 +378,9 @@ async function main(): Promise<void> {
 
   s.start("Saving configuration...");
   writeEnvFile(config, existingEnv);
+  // Load the config just written before anything reads it (model download,
+  // indexing); it wins over values inherited from the shell.
+  dotenv.config({ path: ENV_FILE, override: true, quiet: true });
   s.stop("Configuration saved to .env");
 
   // Download local model if needed
@@ -469,9 +472,6 @@ async function main(): Promise<void> {
     }
 
     try {
-      // Load the config just written (it wins over values inherited from the shell)
-      dotenv.config({ path: ENV_FILE, override: true, quiet: true });
-
       const result = await runIndexing(mode);
       const skippedInfo = result.skipped ? `, ${result.skipped} unchanged` : "";
       const doneMsg = `Indexed ${result.count} notes in ${(result.timeMs / 1000).toFixed(1)}s${skippedInfo}`;

@@ -17,7 +17,8 @@ export function parseIndexTtlSeconds(raw: string | undefined): number | null {
 /**
  * Decide whether auto-refresh should run.
  *
- * - No previous index or check (lastRefreshMs null) => run
+ * - No index baseline (lastRefreshMs null) => skip: auto-refresh only keeps an
+ *   existing index fresh; building one from scratch is left to index-notes
  * - Otherwise run only when the TTL has expired
  */
 export function shouldAutoRefreshByTtl(
@@ -26,7 +27,7 @@ export function shouldAutoRefreshByTtl(
   lastRefreshMs: number | null
 ): boolean {
   if (lastRefreshMs === null) {
-    return true;
+    return false;
   }
   return nowMs - lastRefreshMs >= ttlSeconds * 1000;
 }

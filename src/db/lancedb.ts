@@ -43,6 +43,14 @@ export interface IndexMetadataRecord {
   indexed_at: string;
 }
 
+/** Per-note metadata of the chunks table. */
+export interface ChunkNoteMetadata {
+  note_id: string;
+  note_title: string;
+  folder: string;
+  modified: string;
+}
+
 /** Row returned by notes-table vector/FTS search. */
 export interface NoteSearchRow {
   id: string;
@@ -333,10 +341,12 @@ abstract class LanceTable {
     }
     const db = await this.ensureConnection();
     const schema = this.schemaFor(rows[0].vector.length);
-    this.table = null;
+    // Keep serving the old handle until the new table exists, then cache the
+    // new handle before building FTS on it: a reader that opened its own handle
+    // in between would keep a version without the FTS index.
     const table = await db.createTable(this.tableName, rows, { schema, mode: "overwrite" });
-    await table.createIndex("content", { config: ftsIndexConfig(), replace: true });
     this.table = table;
+    await table.createIndex("content", { config: ftsIndexConfig(), replace: true });
     debug(`${this.tableName}: indexed ${rows.length} rows`);
   }
 
@@ -351,10 +361,9 @@ abstract class LanceTable {
   protected async upsertOn(key: string, rows: Record<string, unknown>[]): Promise<void> {
     if (rows.length === 0) return;
     const table = await this.ensureTable();
-    // mergeInsert does not apply the table schema itself; convert explicitly
-    // so all-empty list columns don't break Arrow inference.
-    const data = lancedb.makeArrowTable(rows, { schema: await table.schema() });
-    await table.mergeInsert(key).whenMatchedUpdateAll().whenNotMatchedInsertAll().execute(data);
+    // mergeInsert converts rows with the table's own schema (like Table.add),
+    // so all-empty list columns need no Arrow inference.
+    await table.mergeInsert(key).whenMatchedUpdateAll().whenNotMatchedInsertAll().execute(rows);
     debug(`${this.tableName}: upserted ${rows.length} rows`);
   }
 
@@ -407,12 +416,13 @@ abstract class LanceTable {
   /** Drop the table and the embedding model record (purge). */
   async clear(): Promise<void> {
     const db = await this.ensureConnection();
-    this.table = null;
     const names = await db.tableNames();
     if (names.includes(this.tableName)) {
       await db.dropTable(this.tableName);
       debug(`${this.tableName}: dropped`);
     }
+    // Forget the handle only once the table is gone, so no reader can cache it after.
+    this.table = null;
     await fs.rm(modelFilePath(this.dbPath), { force: true });
   }
 }
@@ -539,16 +549,23 @@ export class ChunkStore extends LanceTable {
     await this.deleteWhereIn("note_id", noteIds);
   }
 
-  /** One `{ note_id, modified }` entry per indexed note. */
-  async getNoteMetadata(): Promise<Array<{ note_id: string; modified: string }>> {
+  /** One entry per indexed note: id, title, folder and modified (change detection, skip matching). */
+  async getNoteMetadata(): Promise<ChunkNoteMetadata[]> {
     const table = await this.ensureTable();
-    const rows = await table.query().select(["note_id", "modified"]).toArray();
-    const byNote = new Map<string, string>();
+    const rows = await table.query().select(["note_id", "note_title", "folder", "modified"]).toArray();
+    const byNote = new Map<string, ChunkNoteMetadata>();
     for (const row of rows) {
       const noteId = row.note_id as string;
-      if (!byNote.has(noteId)) byNote.set(noteId, row.modified as string);
+      if (!byNote.has(noteId)) {
+        byNote.set(noteId, {
+          note_id: noteId,
+          note_title: row.note_title as string,
+          folder: row.folder as string,
+          modified: row.modified as string,
+        });
+      }
     }
-    return Array.from(byNote, ([note_id, modified]) => ({ note_id, modified }));
+    return [...byNote.values()];
   }
 
   /**

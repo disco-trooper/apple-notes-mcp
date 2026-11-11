@@ -3,8 +3,9 @@
  *
  * - Configuration (OPENROUTER_API_KEY, EMBEDDING_MODEL, EMBEDDING_DIMS) is read
  *   at call time, so values loaded by dotenv after module import are honoured.
- * - One request function with retry: honours Retry-After on 429, fails fast on
- *   non-retryable statuses, never sleeps after the last attempt.
+ * - One request function with retry: honours Retry-After on every retryable
+ *   status (429, 5xx, 402 with Retry-After), fails fast on non-retryable
+ *   statuses, never sleeps after the last attempt.
  * - Results are placed by the response `index` field and dimension-checked.
  * - Callers own batching; the batch function only splits oversized input.
  */
@@ -25,8 +26,8 @@ const API_URL = "https://openrouter.ai/api/v1/embeddings";
 /** Base delay for exponential backoff on non-429 retryable failures */
 const ERROR_BACKOFF_BASE_MS = 1000;
 
-/** HTTP status codes that can never succeed on retry */
-const NON_RETRYABLE_STATUS_CODES = new Set([400, 401, 402, 403, 404, 413, 422]);
+/** HTTP status codes that can never succeed on retry (402 is handled separately) */
+const NON_RETRYABLE_STATUS_CODES = new Set([400, 401, 403, 404, 413, 422]);
 
 /** Max characters of an error response body included in error messages */
 const ERROR_BODY_PREVIEW_LENGTH = 200;
@@ -54,7 +55,7 @@ class OpenRouterError extends Error {
 }
 
 function getApiKey(): string {
-  const apiKey = process.env.OPENROUTER_API_KEY;
+  const apiKey = process.env.OPENROUTER_API_KEY?.trim();
   if (!apiKey) {
     throw new OpenRouterError("OPENROUTER_API_KEY environment variable is not set");
   }
@@ -164,18 +165,25 @@ async function postEmbeddings(input: string[]): Promise<number[][]> {
         signal: controller.signal,
       });
 
-      if (response.status === 429) {
-        const retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"));
-        retryDelayMs = Math.max(retryAfterMs, Math.pow(2, attempt) * RATE_LIMIT_BACKOFF_BASE_MS);
-        throw new OpenRouterError("Rate limited by OpenRouter (429)", 429, true);
-      }
-
       if (!response.ok) {
+        // Read headers before consuming the body
+        const retryAfterHeader = response.headers.get("retry-after");
+        const retryAfterMs = parseRetryAfterMs(retryAfterHeader);
+        const backoffBase = response.status === 429 ? RATE_LIMIT_BACKOFF_BASE_MS : ERROR_BACKOFF_BASE_MS;
+        retryDelayMs = Math.max(retryAfterMs, Math.pow(2, attempt) * backoffBase);
+
+        if (response.status === 429) {
+          throw new OpenRouterError("Rate limited by OpenRouter (429)", 429, true);
+        }
+
+        // 402 (out of credits) is only worth retrying when the server says when
+        const retryable =
+          response.status === 402 ? retryAfterHeader !== null : !NON_RETRYABLE_STATUS_CODES.has(response.status);
         const errorBody = (await response.text()).slice(0, ERROR_BODY_PREVIEW_LENGTH);
         throw new OpenRouterError(
           `OpenRouter API error: ${response.status} - ${errorBody}`,
           response.status,
-          !NON_RETRYABLE_STATUS_CODES.has(response.status)
+          retryable
         );
       }
 

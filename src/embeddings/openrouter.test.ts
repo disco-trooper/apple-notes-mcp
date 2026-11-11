@@ -66,6 +66,17 @@ describe("openrouter embeddings", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("treats a whitespace-only API key as missing and trims the key it sends", async () => {
+    process.env.OPENROUTER_API_KEY = "   ";
+    await expect(getOpenRouterEmbedding("hello")).rejects.toThrow("OPENROUTER_API_KEY");
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    process.env.OPENROUTER_API_KEY = " sk-or-padded\n";
+    fetchMock.mockResolvedValueOnce(okResponse([{ embedding: vec(3, 1), index: 0 }]));
+    await getOpenRouterEmbedding("hello");
+    expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe("Bearer sk-or-padded");
+  });
+
   it("places batch results by response index, not response order", async () => {
     fetchMock.mockResolvedValueOnce(
       okResponse([
@@ -100,11 +111,42 @@ describe("openrouter embeddings", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("does not retry 402 (out of credits)", async () => {
+  it("does not retry 402 (out of credits) without Retry-After", async () => {
     fetchMock.mockResolvedValue(errorResponse(402));
 
     await expect(getOpenRouterEmbedding("hello")).rejects.toThrow("402");
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries 402 after its Retry-After when the header is present", async () => {
+    vi.useFakeTimers();
+    fetchMock
+      .mockResolvedValueOnce(errorResponse(402, { "Retry-After": "3" }))
+      .mockResolvedValueOnce(okResponse([{ embedding: vec(3, 1), index: 0 }]));
+
+    const pending = getOpenRouterEmbedding("hello");
+    await vi.advanceTimersByTimeAsync(2999);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+
+    await expect(pending).resolves.toHaveLength(3);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("honours Retry-After on 503 when it exceeds the backoff", async () => {
+    vi.useFakeTimers();
+    fetchMock
+      .mockResolvedValueOnce(errorResponse(503, { "Retry-After": "5" }))
+      .mockResolvedValueOnce(okResponse([{ embedding: vec(3, 1), index: 0 }]));
+
+    const pending = getOpenRouterEmbedding("hello");
+    // Plain backoff for the first retry would be 1000ms
+    await vi.advanceTimersByTimeAsync(4999);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+
+    await expect(pending).resolves.toHaveLength(3);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("waits for Retry-After on 429 before retrying", async () => {

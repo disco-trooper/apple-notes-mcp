@@ -1,5 +1,8 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { envFlag, validateEnv } from "./env.js";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { envFlag, loadEnvFile, parseFlag, validateEnv } from "./env.js";
 
 const KEYS = [
   "OPENROUTER_API_KEY",
@@ -13,6 +16,7 @@ const KEYS = [
   "NOTES_FETCH_BATCH_SIZE",
   "JXA_TIMEOUT_MS",
   "DEBUG",
+  "NOTES_TRASH_FOLDER",
 ];
 
 const originalEnv = { ...process.env };
@@ -96,5 +100,42 @@ describe("envFlag", () => {
   it("is false when unset", () => {
     setEnv({});
     expect(envFlag("DEBUG")).toBe(false);
+  });
+});
+
+describe("loadEnvFile", () => {
+  function writeTempEnv(content: string): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "notes-env-"));
+    const file = path.join(dir, ".env");
+    fs.writeFileSync(file, content);
+    return file;
+  }
+
+  it("lets .env fill keys that are set but blank in the environment", () => {
+    const file = writeTempEnv("READONLY_MODE=true\nOPENROUTER_API_KEY=sk-or-from-file\n");
+    const env: NodeJS.ProcessEnv = { READONLY_MODE: "", OPENROUTER_API_KEY: "   " };
+
+    loadEnvFile(file, env);
+
+    expect(parseFlag(env.READONLY_MODE)).toBe(true);
+    expect(env.OPENROUTER_API_KEY).toBe("sk-or-from-file");
+  });
+
+  it("keeps non-blank environment values over the file", () => {
+    const file = writeTempEnv("READONLY_MODE=true\n");
+    const env: NodeJS.ProcessEnv = { READONLY_MODE: "false" };
+
+    loadEnvFile(file, env);
+
+    expect(env.READONLY_MODE).toBe("false");
+  });
+
+  it("leaves blank unknown variables alone", () => {
+    const file = writeTempEnv("");
+    const env: NodeJS.ProcessEnv = { SOMETHING_ELSE: "" };
+
+    loadEnvFile(file, env);
+
+    expect(env).toEqual({ SOMETHING_ELSE: "" });
   });
 });

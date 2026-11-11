@@ -18,9 +18,12 @@ import { parseTable } from "./tables.js";
 function tableToMarkdown(rows: string[][]): string {
   if (rows.length === 0) return "";
 
-  // Escape pipes; keep in-cell line breaks as <br> so the row stays on one line.
+  // Cells bypass Turndown's text escaping, so run the same escaper here; then
+  // escape pipes and keep in-cell line breaks as <br> so the row stays on one line.
   const toLine = (row: string[]) =>
-    `| ${row.map((cell) => cell.replace(/\|/g, "\\|").replace(/\n/g, "<br>")).join(" | ")} |`;
+    `| ${row
+      .map((cell) => turndownService.escape(cell).replace(/\|/g, "\\|").replace(/\n/g, "<br>"))
+      .join(" | ")} |`;
   const separator = `|${rows[0].map(() => "---").join("|")}|`;
   return [toLine(rows[0]), separator, ...rows.slice(1).map(toLine)].join("\n");
 }
@@ -74,11 +77,12 @@ const turndownService = new TurndownService({
  * Escaping: Turndown's default escaper backslash-escapes every `[`, `]` and `_`.
  * That turns `[[Wiki Link]]` into `\[\[Wiki Link\]\]` and `#my_tag` into
  * `#my\_tag`, so graph extraction (outlinks, tags) never sees them. We keep the
- * default escaping but leave `[[...]]` verbatim and drop `\_` between word
+ * default escaping but leave `[[...]]` verbatim (unless followed by `(`, which
+ * would make it a Markdown link `[[x]](url)`) and drop `\_` between word
  * characters (intraword `_` is never emphasis in CommonMark).
  */
 const defaultEscape = turndownService.escape.bind(turndownService);
-const WIKI_LINK = /(\[\[[^[\]\n]+\]\])/;
+const WIKI_LINK = /(\[\[[^[\]\n]+\]\](?!\())/;
 const INTRAWORD_UNDERSCORE = /(?<=[\p{L}\p{N}])((?:\\_)+)(?=[\p{L}\p{N}])/gu;
 
 turndownService.escape = (text: string): string =>
@@ -92,7 +96,8 @@ turndownService.escape = (text: string): string =>
     .join("");
 
 // Tables: render from the raw table HTML so cells keep their own line breaks
-// and aren't run through Turndown's whitespace collapsing and escaping.
+// and aren't run through Turndown's whitespace collapsing (cells are escaped
+// in tableToMarkdown).
 turndownService.addRule("tables", {
   filter: "table",
   replacement: (_content, node) => {

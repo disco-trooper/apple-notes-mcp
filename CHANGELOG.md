@@ -9,12 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
-- **Apple Silicon Mac required.** `@lancedb/lancedb` 0.41 ships no native binaries for Intel (x64) Macs
+- **Apple Silicon Mac required.** `@lancedb/lancedb` 0.41 ships no native binaries for Intel (x64) Macs; the package's `cpu` field now blocks installation there instead of failing at load
 - **Duplicate titles are an error.** `get-note` and every tool that takes a note title return an error with `id:` suggestions instead of using the first match
 - **Ambiguous folder names are an error.** A folder name that exists in several accounts must be given as `Account/Folder`
 - **Read-only mode hides write tools.** With `READONLY_MODE` on, write tools are not registered at all
 - **`search-notes` needs the chunk index.** The fallback to the old notes-table search is gone; without an index it asks you to run `index-notes`
 - **Run `index-notes` with `mode: "full"` after upgrading.** Markdown conversion, tag and link extraction, the e5 query/passage prefixes and secret redaction all changed, so content indexed by 1.9.0 no longer matches what this version indexes and searches
+- **Stricter environment validation.** Numeric env vars must be positive integers (`INDEX_TTL` non-negative); invalid values stop the server at startup
 
 ### Added
 
@@ -25,6 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - In-process index lock: `index-notes`, background jobs, `reindex-note`, `purge-index` and post-write sync no longer write the index concurrently; search auto-refresh is skipped while indexing runs
 - `search-notes` results include the note `id`
 - `CHANGELOG.md` ships in the npm package
+- `NOTES_TRASH_FOLDER` environment variable for a localized "Recently Deleted" folder name the server does not recognise
+- `index-notes` sends progress notifications when the client asks for them
 - CI workflow running type check and tests on macOS
 
 ### Changed
@@ -32,7 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `READONLY_MODE` and `DEBUG` accept `true`/`false`/`1`/`0` (case-insensitive)
 - Titles containing `/` resolve as titles; `Folder/Title` is tried as a folder-scoped lookup as well
 - `create-note` no longer duplicates the title when the content starts with it (Apple Notes writes the title as the first line itself). The response says when Apple Notes chose a different title
-- Notes in "Recently Deleted" are no longer listed, indexed or matched by title, and folder lookups never target it (`id:` lookups still reach them)
+- Notes in "Recently Deleted" (also under its localized names, or the name set in `NOTES_TRASH_FOLDER`) are no longer listed, indexed or matched by title, and folder lookups never target it (`id:` lookups still reach them)
 - `delete-note` requires `confirm: true` in the input schema (any other value is rejected before the handler runs)
 - `index-notes` syncs both the notes table (tags, links, related notes) and the chunk table (search) by note id in one run; incremental mode compares each note's `modified` date with the stored one
 - `search-notes` with `include_content: true` reads the note by id
@@ -51,6 +54,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keyword search index stores token positions, so quoted phrases match as phrases. No stemming or stop-word removal; accents are folded (`prilis` matches `příliš`). Indexes written by 1.9.0 still open; the keyword index is rebuilt on the next index run
 - Upgraded `@modelcontextprotocol/sdk` to 1.32
 - Faster indexing: only chunks are embedded (a note's vector is the normalized mean of its chunk vectors), chunk vectors stored by the same embedding model are reused for unchanged chunk text in both full and incremental runs, and the local model embeds in pipeline batches of 8. `index-notes` reports embedded and reused chunk counts
+- Write tools no longer wait for a running index; the index update for the written notes is queued and the response says so
+- Search auto-refresh only updates an existing index and never builds a missing one
+- `list-notes` accepts `Account/Folder` and nested folder paths
+- Folder-mode `batch-delete` and `batch-move` process notes in groups
 
 ### Fixed
 
@@ -63,6 +70,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Empty `tags`/`outlinks` columns no longer break LanceDB table creation (explicit Arrow schemas)
 - Filter values containing quotes are escaped correctly in index deletes and updates
 - Index rows are keyed by note id, so notes with the same title in different folders no longer overwrite each other
+- Incremental indexing keeps the index rows of notes and folders that failed to read, and picks up folder changes
+- `batch-move` validates the target folder before moving anything, so a missing or ambiguous folder is an error instead of "moved 0, failed all"
+- Table cells keep literal Markdown characters (`*`, `_`, `` ` ``, `[..](..)`) through `get-note` → `update-note`
+- Wiki links to titles containing `#` (`[[C# cheatsheet]]`) resolve to the full title; tags inside italics are extracted
+- OpenRouter: a 402 with `Retry-After` is retried, and 503 honours `Retry-After`
+- Blank values in the MCP client's `env` block no longer shadow settings from `~/.apple-notes-mcp/.env`
+- Setup wizard downloads and indexes with the local model you chose instead of the default one
+- Hybrid search fetches enough candidates from both rankings, so a folder filter no longer returns fewer results than the limit
+- Background index job errors hide internal details like other tool errors
 
 ### Removed
 

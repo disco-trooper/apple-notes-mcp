@@ -76,6 +76,7 @@ Settings live in `~/.apple-notes-mcp/.env`. Variables in the MCP client's `env` 
 | `EMBEDDING_BATCH_SIZE` | Texts per embedding batch | `50` |
 | `NOTES_FETCH_BATCH_SIZE` | Notes per Apple Notes fetch batch | `100` |
 | `JXA_TIMEOUT_MS` | Timeout for a single Apple Notes script | `120000` |
+| `NOTES_TRASH_FOLDER` | Name of the "Recently Deleted" folder when Apple Notes uses a localized name the server does not recognise | - |
 | `DEBUG` | Debug logging to stderr (`true`/`false`/`1`/`0`) | `false` |
 
 See [docs/models.md](docs/models.md) for embedding models.
@@ -110,7 +111,9 @@ Notes are addressed as `Title`, `Folder/Title`, `Account/Folder/Title`, or `id:x
 | Write | `batch-delete` | Delete several notes or a whole folder (requires `confirm: true`) |
 | Write | `batch-move` | Move several notes or a whole folder |
 
-Write tools are not registered when `READONLY_MODE` is on. After each write the index is updated for the affected notes; if that fails, the response includes an `index sync warning`.
+Write tools are not registered when `READONLY_MODE` is on. After each write the index is updated for the affected notes; if that fails, the response includes an `index sync warning`. While an index run is in progress, the update is queued and the write returns right away.
+
+For large libraries, run `index-notes` with `background: true` and follow the job with `get-index-job`. A foreground run sends progress notifications to clients that request them.
 
 ## Troubleshooting
 
@@ -118,7 +121,7 @@ Write tools are not registered when `READONLY_MODE` is on. After each write the 
 - **"Embedding model changed"**: the index was built with another model or dimensions. Run `purge-index`, then `index-notes` with `mode: "full"`.
 - **Skipped notes**: locked or still-syncing notes cannot be read. Unlock them or wait for iCloud sync, then reindex.
 - **Slow first search**: the local model is downloaded and loaded on first use.
-- **"Operation disabled in read-only mode"**: set `READONLY_MODE=false` and restart the client.
+- **Write tools missing or "tool not found"**: `READONLY_MODE` is on. Set `READONLY_MODE=false` and restart the client.
 
 ## Development
 
