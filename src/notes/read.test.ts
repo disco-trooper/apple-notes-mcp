@@ -285,6 +285,41 @@ describe("getAllFolders", () => {
     const folders = await getAllFolders();
     expect(folders).toEqual(["Work", "Personal", "Archive"]);
   });
+
+  it("should hide every account's Recently Deleted folder", async () => {
+    const mockFolders = ["Work", "Recently Deleted", "Notes", "recently deleted"];
+    vi.mocked(executeJxa).mockReset();
+    vi.mocked(executeJxa).mockResolvedValue(
+      JSON.stringify({ names: mockFolders, counts: mockFolders.map(() => 0) })
+    );
+
+    await expect(getAllFolders()).resolves.toEqual(["Work", "Notes"]);
+  });
+});
+
+describe("Recently Deleted exclusion", () => {
+  const library: FolderedNote[] = [
+    { id: "w", title: "Live", folder: "Work", created: "2024-01-01T00:00:00Z", modified: "2024-01-02T00:00:00Z" },
+    { id: "t", title: "Trashed", folder: "Recently Deleted", created: "2024-01-01T00:00:00Z", modified: "2024-01-03T00:00:00Z" },
+    { id: "p", title: "Personal", folder: "Personal", created: "2024-01-01T00:00:00Z", modified: "2024-01-04T00:00:00Z" },
+  ];
+
+  it("getAllNotes never fetches the trash folder and keeps later indices intact", async () => {
+    mockFolderedNotes(library);
+
+    const notes = await getAllNotes();
+    expect(notes.map((n) => n.id)).toEqual(["w", "p"]);
+    const fetched = vi.mocked(executeJxa).mock.calls.map(([code]) => String(code));
+    expect(fetched.some((code) => code.includes('"Recently Deleted"'))).toBe(false);
+    // "Personal" sits after the trash folder: still addressed by its real index.
+    expect(fetched.some((code) => code.includes("const folderIndex = 2;"))).toBe(true);
+  });
+
+  it("list-notes cannot list the trash folder by name", async () => {
+    mockFolderedNotes(library);
+
+    await expect(listNotes({ folder: "recently deleted" })).resolves.toEqual([]);
+  });
 });
 
 describe("resolveNoteTitle", () => {

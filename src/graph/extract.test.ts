@@ -38,13 +38,17 @@ describe("extractTags", () => {
     expect(extractTags(content)).toEqual(["tag"]);
   });
 
-  it("ignores hex colors that contain a digit", () => {
-    const content = "Color #000 and #a1b2c3 and #ff0000cc are not tags";
+  it("ignores hex colors, including all-letter ones", () => {
+    const content = "Color #000 #ddd #ffffff #a1b2c3 #ff0000cc #bad #cafe are not tags";
     expect(extractTags(content)).toEqual([]);
   });
 
-  it("keeps words made of hex letters", () => {
-    expect(extractTags("#bad #cafe #fade #fff")).toEqual(["bad", "cafe", "fade", "fff"]);
+  it("ignores single-character tags", () => {
+    expect(extractTags("#a #x and #ok")).toEqual(["ok"]);
+  });
+
+  it("keeps real words that are not hex", () => {
+    expect(extractTags("#workoutlog #my_tag #idea")).toEqual(["workoutlog", "my_tag", "idea"]);
   });
 
   it("keeps Unicode letters", () => {
@@ -118,10 +122,10 @@ describe("extractMetadata", () => {
 describe("extractMetadata on htmlToMarkdown output", () => {
   it("finds tags and links that Turndown backslash-escapes", () => {
     const markdown = htmlToMarkdown(
-      "<div>[[Meeting Notes]] #my_tag #práce #bad</div><div>[[Plan|the plan]] https://x.com/p#sec</div>"
+      "<div>[[Meeting Notes]] #my_tag #práce #ffffff</div><div>[[Plan|the plan]] https://x.com/p#sec</div>"
     );
     expect(extractMetadata(markdown)).toEqual({
-      tags: ["my_tag", "práce", "bad"],
+      tags: ["my_tag", "práce"],
       outlinks: ["Meeting Notes", "Plan"],
     });
   });

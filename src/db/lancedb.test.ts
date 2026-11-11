@@ -171,6 +171,25 @@ describe("LanceDBStore", () => {
     expect(results.map((r) => r.id)).toEqual(["a"]);
   });
 
+  it("searchFTS supports quoted phrase queries", async () => {
+    await store.index([
+      record("a", { content: "Notes about the planning meeting" }),
+      record("b", { content: "Meeting about planning" }),
+    ]);
+    const results = await store.searchFTS('"planning meeting"', 10);
+    expect(results.map((r) => r.id)).toEqual(["a"]);
+  });
+
+  it("searchFTS keeps stop words and folds diacritics", async () => {
+    await store.index([
+      record("a", { content: "Příliš žluťoučký kůň" }),
+      record("b", { content: "the meeting" }),
+    ]);
+    expect((await store.searchFTS("prilis", 10)).map((r) => r.id)).toEqual(["a"]);
+    expect((await store.searchFTS("příliš", 10)).map((r) => r.id)).toEqual(["a"]);
+    expect((await store.searchFTS("the", 10)).map((r) => r.id)).toEqual(["b"]);
+  });
+
   it("count is 0 and getIndexMetadata throws when no table exists", async () => {
     expect(await store.count()).toBe(0);
     await expect(store.getIndexMetadata()).rejects.toThrow("Index not found");

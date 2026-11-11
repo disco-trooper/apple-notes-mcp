@@ -19,11 +19,12 @@ function prepare(content: string): string {
 }
 
 /**
- * Hex colour code (`#a1b2c3`, `#000`, `#ff0000cc`): 3, 6 or 8 hex digits
- * with at least one decimal digit, so words like `#bad` or `#cafe` stay tags.
+ * Hex colour code (`#fff`, `#a1b2c3`, `#ffffffcc`): 3, 4, 6 or 8 hex digits.
+ * Words made only of hex letters (`#bad`, `#cafe`) are dropped too; in real
+ * notes those are far more often colours than tags.
  */
 function isHexColor(value: string): boolean {
-  return /^(?:[0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(value) && /\d/.test(value);
+  return /^(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(value);
 }
 
 /**
@@ -35,7 +36,8 @@ const TAG_PATTERN = /(?<![\p{L}\p{N}\p{M}_/&#\\])#([\p{L}\p{N}_][\p{L}\p{N}\p{M}
 
 /**
  * Extract hashtags from content, lowercased and deduplicated.
- * Ignores code, URL fragments, hex colours and purely numeric tags (`#42`).
+ * Ignores code, URL fragments, hex colours, purely numeric tags (`#42`) and
+ * single-character tags.
  */
 export function extractTags(content: string): string[] {
   // Drop URLs first so their `#fragment` parts are not read as tags.
@@ -43,7 +45,7 @@ export function extractTags(content: string): string[] {
   const tags: string[] = [];
   for (const match of text.matchAll(TAG_PATTERN)) {
     const tag = match[1].replace(/-+$/, "").toLowerCase();
-    if (!tag || /^\d+$/.test(tag) || isHexColor(tag)) continue;
+    if (tag.length < 2 || /^\d+$/.test(tag) || isHexColor(tag)) continue;
     tags.push(tag);
   }
   return [...new Set(tags)];

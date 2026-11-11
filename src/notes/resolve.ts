@@ -38,19 +38,40 @@ export interface NoteLookupCandidate {
 }
 
 /**
+ * Scripting name of Apple Notes' trash folder, lowercased. Notes reports it
+ * in English regardless of the system language, once per account.
+ */
+const TRASH_FOLDER_NAME = "recently deleted";
+
+/**
+ * True for the "Recently Deleted" trash folder (case-insensitive exact
+ * name, any account). Trashed notes are never listed, indexed, resolved by
+ * title or targeted by folder writes; only `id:` lookups can still reach one.
+ */
+export function isTrashFolderName(name: string): boolean {
+  return name.trim().toLowerCase() === TRASH_FOLDER_NAME;
+}
+
+/**
  * JXA helpers shared by every script that addresses folders. Expects `app`
  * (Application('Notes')) in scope.
  *
+ * - `isTrashFolder(f)`: the "Recently Deleted" folder (see isTrashFolderName).
  * - `folderPathInfo(f)`: leaf name, nested path (`Parent/Child`) and account
  *   name. `app.folders()` is flat (nested folders included), so the path is
  *   rebuilt from the `container()` chain.
  * - `folderMatches(f, ref)`: `ref` is the leaf name, the nested path, or
  *   `Account/path`.
- * - `findFolder(ref, label)`: exactly one folder or a thrown Error. A name
- *   shared by several folders (e.g. "Notes" in iCloud and On My Mac) throws
- *   with every `Account/path`, which the caller can pass back to pick one.
+ * - `findFolder(ref, label)`: exactly one non-trash folder or a thrown
+ *   Error. A name shared by several folders (e.g. "Notes" in iCloud and On
+ *   My Mac) throws with every `Account/path`, which the caller can pass back
+ *   to pick one.
  */
 export const FOLDER_JXA_HELPERS = `
+    function isTrashFolder(f) {
+      return String(f.name()).trim().toLowerCase() === ${JSON.stringify(TRASH_FOLDER_NAME)};
+    }
+
     function folderPathInfo(f) {
       const parts = [f.name()];
       let c = f.container();
@@ -79,6 +100,7 @@ export const FOLDER_JXA_HELPERS = `
           return ref === info.path || ref === info.account + '/' + info.path;
         });
       }
+      hits = hits.filter(function (f) { return !isTrashFolder(f); });
       if (hits.length === 0) {
         throw new Error(label + ' not found: ' + ref);
       }
@@ -116,8 +138,9 @@ export function buildLookupCandidates(input: string): NoteLookupCandidate[] {
 /**
  * JXA that tries each candidate in order and stops at the first one with
  * matches. Returns JSON: one array of `{ id, title, folder, created }`
- * matches per tried candidate. Uses bulk getters on the `whose` result;
- * only the folder needs a per-match lookup.
+ * matches per tried candidate. Notes in "Recently Deleted" never match.
+ * Uses bulk getters on the `whose` result; only the folder needs a
+ * per-match lookup.
  */
 function buildFindNotesJxa(candidates: NoteLookupCandidate[]): string {
   return `
@@ -135,7 +158,7 @@ function buildFindNotesJxa(candidates: NoteLookupCandidate[]): string {
       for (let i = 0; i < ids.length; i++) {
         try {
           const folder = app.notes.byId(ids[i]).container();
-          if (cand.folder !== null && !folderMatches(folder, cand.folder)) {
+          if (isTrashFolder(folder) || (cand.folder !== null && !folderMatches(folder, cand.folder))) {
             continue;
           }
           const created = createdList[i];

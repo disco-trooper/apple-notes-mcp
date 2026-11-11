@@ -51,18 +51,23 @@ const NAMED_ENTITIES: Record<string, string> = {
 
 /**
  * Decode HTML entities in a single pass (so `&amp;lt;` becomes `&lt;`, not `<`).
+ * Also decodes the legacy no-semicolon forms Apple Notes writes back
+ * (`$&amp cheap`) when not followed by a letter or digit, so `&ampersand` stays.
  */
 function decodeEntities(text: string): string {
-  return text.replace(/&(#\d+|#x[0-9a-f]+|[a-z]+);/gi, (match, entity: string) => {
-    if (entity[0] === "#") {
-      const code =
-        entity[1] === "x" || entity[1] === "X"
-          ? parseInt(entity.slice(2), 16)
-          : parseInt(entity.slice(1), 10);
-      return code <= 0x10ffff ? String.fromCodePoint(code) : match;
+  return text.replace(
+    /&(?:(#\d+|#x[0-9a-f]+|[a-z]+);|(amp|lt|gt|quot|nbsp)(?![a-z0-9]))/gi,
+    (match, entity: string | undefined, legacy: string | undefined) => {
+      if (legacy) return NAMED_ENTITIES[legacy.toLowerCase()];
+      const name = entity ?? "";
+      if (name[0] === "#") {
+        const code =
+          name[1] === "x" || name[1] === "X" ? parseInt(name.slice(2), 16) : parseInt(name.slice(1), 10);
+        return code <= 0x10ffff ? String.fromCodePoint(code) : match;
+      }
+      return NAMED_ENTITIES[name.toLowerCase()] ?? match;
     }
-    return NAMED_ENTITIES[entity.toLowerCase()] ?? match;
-  });
+  );
 }
 
 /**

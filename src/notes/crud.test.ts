@@ -159,7 +159,7 @@ describe("generated scripts embed user strings as JSON literals", () => {
 });
 
 describe("createNote", () => {
-  it("writes the title as the first line so Apple Notes keeps it", async () => {
+  it("passes the title as the note name and leaves other content untouched", async () => {
     vi.mocked(executeJxa).mockResolvedValueOnce(
       JSON.stringify({ id: "note-1", title: "Groceries", folder: "Work" })
     );
@@ -171,11 +171,14 @@ describe("createNote", () => {
       requestedTitle: "Groceries",
       titleChanged: false,
     });
-    expect(constLiteral(scriptOf(0), "content")).toBe("<h1>Groceries</h1><p>milk\neggs</p>");
+    const script = scriptOf(0);
+    expect(constLiteral(script, "title")).toBe("Groceries");
+    expect(script).toContain("app.Note({name: title, body: content})");
+    expect(constLiteral(script, "content")).toBe("<p>milk\neggs</p>");
   });
 
-  it.each(["# Groceries\n\nmilk", "Groceries\nmilk", "  ## Groceries  \nmilk"])(
-    "does not duplicate a title the content already starts with (%j)",
+  it.each(["# Groceries\n\nmilk", "Groceries\nmilk", "  ## Groceries  \nmilk", "\n\n# Groceries\nmilk"])(
+    "drops a first line repeating the title, since Notes already writes it (%j)",
     async (content) => {
       vi.mocked(executeJxa).mockResolvedValueOnce(
         JSON.stringify({ id: "n", title: "Groceries", folder: "Notes" })
@@ -183,16 +186,16 @@ describe("createNote", () => {
 
       await createNote("Groceries", content);
 
-      expect(constLiteral(scriptOf(0), "content")).toBe(`<p>${content}</p>`);
+      expect(constLiteral(scriptOf(0), "content")).toBe("<p>milk</p>");
     }
   );
 
-  it("escapes HTML in the title heading", async () => {
-    vi.mocked(executeJxa).mockResolvedValueOnce(JSON.stringify({ id: "n", title: "a<b>&c", folder: "Notes" }));
+  it("keeps a first line that only starts like the title", async () => {
+    vi.mocked(executeJxa).mockResolvedValueOnce(JSON.stringify({ id: "n", title: "Groceries", folder: "Notes" }));
 
-    await createNote("a<b>&c", "body");
+    await createNote("Groceries", "Groceries list\nmilk");
 
-    expect(constLiteral(scriptOf(0), "content")).toBe("<h1>a&lt;b&gt;&amp;c</h1><p>body</p>");
+    expect(constLiteral(scriptOf(0), "content")).toBe("<p>Groceries list\nmilk</p>");
   });
 
   it("uses the default folder when none is given", async () => {

@@ -15,7 +15,7 @@
   "dependencies": {
     "@clack/prompts": "^0.8.0",
     "@huggingface/transformers": "^3.0.0",
-    "@lancedb/lancedb": "^0.13.0",
+    "@lancedb/lancedb": "^0.41.0",
     "@modelcontextprotocol/sdk": "^1.32.0",
     "apache-arrow": "^21.1.0",
     "dotenv": "^16.6.0",

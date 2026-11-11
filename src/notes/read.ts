@@ -6,7 +6,7 @@
  */
 
 import { executeJxa, type JxaRunOptions } from "./jxa-runner.js";
-import { resolveNoteTitle } from "./resolve.js";
+import { resolveNoteTitle, isTrashFolderName } from "./resolve.js";
 import { createDebugLogger } from "../utils/debug.js";
 import { htmlToMarkdown } from "./conversion.js";
 import { getNotesFetchBatchSize } from "../config/constants.js";
@@ -519,22 +519,30 @@ async function enumerateFoldersWithCounts(runOpts?: JxaRunOptions): Promise<Fold
 }
 
 /**
- * Indices of `names` matching `folderName`: exact matches on the content
- * path, case-folded matches on the metadata path. Every matching index is
- * fetched separately, so duplicate folder names aggregate the way the
- * pre-bulk-fetch implementation did.
+ * Enumeration indices of every folder except "Recently Deleted" (see
+ * isTrashFolderName): trashed notes are never listed or indexed. Indices
+ * stay positions in `app.folders()`, which the batch scripts address.
  */
-function filterFolderIndices(names: string[], folderName: string, caseInsensitive: boolean): number[] {
+function listedFolderIndices(names: string[]): number[] {
   const indices: number[] = [];
   for (let i = 0; i < names.length; i++) {
-    const matches = caseInsensitive
-      ? names[i].toLowerCase() === folderName.toLowerCase()
-      : names[i] === folderName;
-    if (matches) {
+    if (!isTrashFolderName(names[i])) {
       indices.push(i);
     }
   }
   return indices;
+}
+
+/**
+ * Listed indices (trash excluded) of `names` matching `folderName`: exact
+ * matches on the content path, case-folded matches on the metadata path.
+ * Every matching index is fetched separately, so duplicate folder names
+ * aggregate the way the pre-bulk-fetch implementation did.
+ */
+function filterFolderIndices(names: string[], folderName: string, caseInsensitive: boolean): number[] {
+  return listedFolderIndices(names).filter((i) =>
+    caseInsensitive ? names[i].toLowerCase() === folderName.toLowerCase() : names[i] === folderName
+  );
 }
 
 /** Resolve and validate the per-call batch size for one folder label. */
@@ -936,7 +944,7 @@ export async function getAllNotes(opts?: JxaRunOptions): Promise<NoteInfo[]> {
   const { names, counts } = await enumerateFoldersWithCounts(runOpts);
 
   const allNotes: NoteInfo[] = [];
-  for (let folderIndex = 0; folderIndex < names.length; folderIndex++) {
+  for (const folderIndex of listedFolderIndices(names)) {
     if (opts?.signal?.aborted) {
       throw new IndexCancelledError("Fetch of all notes cancelled");
     }
@@ -1066,7 +1074,7 @@ async function getAllNotesWithContent(opts?: BulkFetchOptions): Promise<NoteDeta
   const { names, counts } = await enumerateFoldersWithCounts(runOpts);
 
   const allNotes: NoteDetails[] = [];
-  for (let folderIndex = 0; folderIndex < names.length; folderIndex++) {
+  for (const folderIndex of listedFolderIndices(names)) {
     if (opts?.signal?.aborted) {
       throw new IndexCancelledError("Fetch of all notes cancelled");
     }
@@ -1138,7 +1146,7 @@ export async function getAllNotesWithFallback(
   const { names: folders, counts: folderCounts } = await enumerateFoldersWithCounts(runOpts);
   debug(`Trying folder-by-folder approach for ${folders.length} folders`);
 
-  for (let folderIndex = 0; folderIndex < folders.length; folderIndex++) {
+  for (const folderIndex of listedFolderIndices(folders)) {
     const folderName = folders[folderIndex];
     if (opts?.signal?.aborted) {
       throw new IndexCancelledError("Fetch of all notes cancelled");
@@ -1213,7 +1221,8 @@ export async function getAllNotesWithFallback(
 export async function getAllFolders(opts?: JxaRunOptions): Promise<string[]> {
   debug("Getting all folders...");
 
-  const { names: folders } = await enumerateFoldersWithCounts(opts);
+  const { names } = await enumerateFoldersWithCounts(opts);
+  const folders = listedFolderIndices(names).map((i) => names[i]);
 
   debug(`Found ${folders.length} folders`);
   return folders;

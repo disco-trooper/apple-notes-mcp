@@ -93,6 +93,19 @@ const DELETE_BATCH_SIZE = 500;
 
 const MODEL_FILE = "index-model.json";
 
+/** Error lancedb raises for fullTextSearch on a table without an inverted (FTS) index. */
+const NO_FTS_INDEX_PATTERN = /unless an INVERTED index has been created/i;
+
+/**
+ * FTS index on `content`. Positions are stored so quoted queries ("exact phrase"),
+ * which lancedb parses as phrase queries, work instead of failing. Notes are mostly
+ * Czech/multilingual, so English stemming and stop words are off; ASCII folding
+ * lets `prilis` match `příliš`.
+ */
+function ftsIndexConfig(): lancedb.Index {
+  return lancedb.Index.fts({ withPosition: true, stem: false, removeStopWords: false, asciiFolding: true });
+}
+
 // ---------------------------------------------------------------------------
 // Arrow schemas (explicit, so empty tags/outlinks never break type inference)
 // ---------------------------------------------------------------------------
@@ -294,7 +307,7 @@ abstract class LanceTable {
     const schema = this.schemaFor(rows[0].vector.length);
     this.table = null;
     const table = await db.createTable(this.tableName, rows, { schema, mode: "overwrite" });
-    await table.createIndex("content", { config: lancedb.Index.fts(), replace: true });
+    await table.createIndex("content", { config: ftsIndexConfig(), replace: true });
     this.table = table;
     debug(`${this.tableName}: indexed ${rows.length} rows`);
   }
@@ -335,17 +348,22 @@ abstract class LanceTable {
   /** Full-text search; [] when no FTS index exists, real errors propagate. */
   protected async ftsSearch(query: string, limit: number): Promise<Record<string, unknown>[]> {
     const table = await this.ensureTable();
-    const indices = await table.listIndices();
-    if (!indices.some((index) => index.indexType === "FTS")) {
-      debug(`${this.tableName}: no FTS index, skipping full-text search`);
-      return [];
+    // Probe by querying, not listIndices(): FTS indexes written by lancedb <=0.13
+    // still serve queries but are not reported by listIndices() in newer releases.
+    try {
+      return await table.query().fullTextSearch(query).limit(limit).toArray();
+    } catch (error) {
+      if (error instanceof Error && NO_FTS_INDEX_PATTERN.test(error.message)) {
+        debug(`${this.tableName}: no FTS index, skipping full-text search`);
+        return [];
+      }
+      throw error;
     }
-    return table.query().fullTextSearch(query).limit(limit).toArray();
   }
 
   async rebuildFtsIndex(): Promise<void> {
     const table = await this.ensureTable();
-    await table.createIndex("content", { config: lancedb.Index.fts(), replace: true });
+    await table.createIndex("content", { config: ftsIndexConfig(), replace: true });
     debug(`${this.tableName}: FTS index rebuilt`);
   }
 

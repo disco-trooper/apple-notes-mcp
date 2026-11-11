@@ -48,6 +48,21 @@ describe("parseTable", () => {
     expect(parseTable(html).rows).toEqual([["first\nsecond\nthird"]]);
   });
 
+  it("decodes the no-semicolon entities Apple Notes writes back", () => {
+    const html = `<object><table><tbody><tr><td><div>$&amp cheap</div></td><td><div>&lt b &gt &quot;q&quot &nbspx</div></td></tr></tbody></table></object>`;
+    expect(parseTable(html).rows).toEqual([["$& cheap", `< b > "q" &nbspx`]]);
+  });
+
+  it("leaves entity-like words without a semicolon untouched", () => {
+    const html = `<object><table><tbody><tr><td><div>&ampersand &lte &amp1</div></td></tr></tbody></table></object>`;
+    expect(parseTable(html).rows).toEqual([["&ampersand &lte &amp1"]]);
+  });
+
+  it("parses Apple Notes <td><br></td> empty cells as empty strings", () => {
+    const html = `<object><table><tbody><tr><td valign="top"><br></td><td valign="top"><div>x</div></td></tr></tbody></table></object>`;
+    expect(parseTable(html).rows).toEqual([["", "x"]]);
+  });
+
   it("returns empty strings for empty cells", () => {
     expect(parseTable(EMPTY_CELLS_TABLE).rows[1]).toEqual(["", "", ""]);
   });
@@ -71,6 +86,22 @@ describe("applyTableEdits", () => {
     const updated = applyTableEdits(EMPTY_CELLS_TABLE, 0, [{ row: 1, column: 2, value: "x" }]);
     expect(parseTable(updated).rows[1]).toEqual(["", "", "x"]);
     expect(updated).toContain(`<tr class="r">${EMPTY_CELL}${EMPTY_CELL}<td valign="top"><div>x</div></td></tr>`);
+  });
+
+  it("edits an empty <td><br></td> cell that has no div", () => {
+    const html = `<object><table><tbody><tr><td valign="top"><br></td><td valign="top"><br></td></tr></tbody></table></object>`;
+    const updated = applyTableEdits(html, 0, [{ row: 0, column: 1, value: "x" }]);
+    expect(updated).toBe(
+      `<object><table><tbody><tr><td valign="top"><br></td><td valign="top"><div>x</div></td></tr></tbody></table></object>`
+    );
+    expect(parseTable(updated).rows).toEqual([["", "x"]]);
+  });
+
+  it("round-trips a $& value through the Notes re-serialized form", () => {
+    const updated = applyTableEdits(EMPTY_CELLS_TABLE, 0, [{ row: 1, column: 0, value: "$& cheap" }]);
+    expect(updated).toContain("<div>$&amp; cheap</div>");
+    const notesForm = updated.replace("$&amp; cheap", () => "$&amp cheap");
+    expect(parseTable(notesForm).rows[1][0]).toBe("$& cheap");
   });
 
   it("edits the right table when tables are identical", () => {

@@ -67,24 +67,18 @@ function markdownToHtml(markdown: string): string {
   }) as string;
 }
 
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
-
 /**
- * Body HTML for a new note. Apple Notes names a note after the first line
- * of its body, so the title becomes an `<h1>` first line unless the
- * content already starts with it (plain or as a Markdown heading).
+ * Body HTML for a new note. `app.Note({name})` already writes the title as
+ * the note's first line, so a first content line repeating the title
+ * (plain or as a Markdown heading) is dropped to avoid a duplicate.
  */
 function buildNewNoteHtml(title: string, content: string): string {
-  const firstLine = content.trimStart().split("\n", 1)[0] ?? "";
-  const leading = firstLine.replace(/^#{1,6}\s+/, "").trim();
-  const body = markdownToHtml(content);
-  return leading === title.trim() ? body : `<h1>${escapeHtml(title)}</h1>${body}`;
+  const lines = content.split("\n");
+  const first = lines.findIndex((line) => line.trim().length > 0);
+  if (first !== -1 && lines[first].trim().replace(/^#{1,6}\s+/, "").trim() === title.trim()) {
+    return markdownToHtml(lines.slice(first + 1).join("\n").replace(/^\s*\n/, ""));
+  }
+  return markdownToHtml(content);
 }
 
 export interface CreateResult {
@@ -99,7 +93,7 @@ export interface CreateResult {
  * Create a new note in Apple Notes. Duplicate titles are allowed (notes are
  * identified by id).
  *
- * @param title - Note title; written as the first line so Apple Notes keeps it
+ * @param title - Note title (Apple Notes writes it as the first line)
  * @param content - Note content (Markdown)
  * @param folder - Optional target folder: name, nested path or "Account/Folder"
  * (defaults to the default account's default folder)
