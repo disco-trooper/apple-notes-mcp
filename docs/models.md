@@ -1,160 +1,66 @@
 # Embedding Models
 
-This guide covers embedding models for apple-notes-mcp.
+apple-notes-mcp embeds note chunks either locally (HuggingFace Transformers) or through the OpenRouter API. The provider is chosen by `OPENROUTER_API_KEY`: set means OpenRouter, unset means local.
 
-## Quick Comparison
+## Defaults
 
-| Provider | Model | Dimensions | Quality | Speed | Memory | Cost |
-|----------|-------|------------|---------|-------|--------|------|
-| Local | Xenova/multilingual-e5-small | 384 | Good | Fast | ~200MB | Free |
-| Local | Xenova/bge-m3 | 1024 | Excellent | Slow | ~2GB | Free |
-| OpenRouter | qwen/qwen3-embedding-8b | 4096 | Excellent | Fast | - | ~$0.02/1M tokens |
+| Provider | Default model | Dimensions |
+|----------|---------------|------------|
+| Local | `Xenova/multilingual-e5-small` | 384 |
+| OpenRouter | `qwen/qwen3-embedding-8b` | 4096 (model's native size) |
 
-## Local Models
+Set `EMBEDDING_MODEL` to use another model with the active provider.
 
-Local models run entirely on your machine using HuggingFace Transformers. They require no API keys.
+## Local models
 
-### Xenova/multilingual-e5-small (Default)
+Local models run on your machine and need no API key. The model is downloaded on first use (or by the setup wizard) and stays loaded in memory while the server runs.
 
-```bash
-# This is the default, no configuration needed
-```
+Dimensions are known for these models:
 
-**Pros:**
-- Small model size (~200MB)
-- Fast inference
-- Strong multilingual support (100+ languages)
-- Handles general note search well
+| Model | Dimensions | Notes |
+|-------|------------|-------|
+| `Xenova/multilingual-e5-small` | 384 | Default. Multilingual. |
+| `Xenova/bge-m3` | 1024 | Multilingual. Much larger download and memory use than the default. |
+| `Xenova/all-MiniLM-L6-v2` | 384 | English. |
+| `Xenova/bge-small-en-v1.5` | 384 | English. |
+| `Xenova/gte-small` | 384 | English. |
 
-**Cons:**
-- Lower dimensional space (384)
-- Misses subtle semantic differences
+Any other model is assumed to produce 384 dimensions. `EMBEDDING_DIMS` does not apply to local models.
 
-**Best for:** Most users, especially those with limited disk space or slower machines.
-
-### Xenova/bge-m3
+e5 models (model name containing `e5`) are used with their trained prefixes: indexed text is embedded as `passage: ...` and search queries as `query: ...`. Other models get the text unchanged.
 
 ```env
 EMBEDDING_MODEL="Xenova/bge-m3"
 ```
 
-**Pros:**
-- State-of-the-art quality
-- 1024 dimensions capture fine-grained semantics
-- Excellent multilingual support
-- Highest retrieval accuracy
+## OpenRouter models
 
-**Cons:**
-- Large model (~2GB download)
-- Slower inference
-- Higher memory usage
-
-**Best for:** Users who prioritize search quality and have resources to spare.
-
-### Xenova/all-MiniLM-L6-v2
-
-```env
-EMBEDDING_MODEL="Xenova/all-MiniLM-L6-v2"
-```
-
-**Pros:**
-- Very small and fast
-- 384 dimensions
-- Handles English content well
-
-**Cons:**
-- English-focused
-- Less accurate than E5
-
-**Best for:** English-only note collections where speed matters most.
-
-## OpenRouter Models
-
-OpenRouter provides cloud-based embeddings. You need an API key from [openrouter.ai](https://openrouter.ai).
-
-### qwen/qwen3-embedding-8b (Default)
+Requires an API key from [openrouter.ai](https://openrouter.ai) and an internet connection. Pricing and rate limits are set by OpenRouter.
 
 ```env
 OPENROUTER_API_KEY="sk-or-..."
 # Optional:
 EMBEDDING_MODEL="qwen/qwen3-embedding-8b"
-EMBEDDING_DIMS="4096"
+EMBEDDING_DIMS="1024"
 ```
 
-**Pros:**
-- High-quality embeddings
-- 4096 dimensions (highly expressive)
-- Requires no local resources
-- Fast API response
+- `EMBEDDING_DIMS` is sent to the API as `dimensions` only when it is set. Use it for models that support reduced output sizes.
+- Without `EMBEDDING_DIMS`, the server expects 4096 dimensions. When you use a different model, set `EMBEDDING_DIMS` to that model's output size; otherwise requests fail with a dimension mismatch error.
+- Requests are retried on rate limits (honouring `Retry-After`) and transient errors.
 
-**Cons:**
-- Requires internet connection
-- Pay per use (~$0.02/1M tokens)
-- API rate limits
+## Changing models
 
-**Best for:** Users who want top quality without managing local models.
+Vectors from different models, or the same model with different dimensions, cannot be compared. The index records the model and dimensions it was built with; an incremental `index-notes` run fails with `Embedding model changed ...` when they differ.
 
-### Other OpenRouter Options
+After changing `EMBEDDING_MODEL`, `EMBEDDING_DIMS`, or the provider:
 
-OpenRouter supports many embedding models. Check their documentation for current options and set `EMBEDDING_MODEL` and `EMBEDDING_DIMS` accordingly.
+1. Run `purge-index`.
+2. Run `index-notes` with `mode: "full"`.
 
-## Choosing a Model
+## Search modes
 
-### Decision Tree
+`search-notes` supports three modes:
 
-1. **Do you have reliable internet and accept small costs?**
-   - Yes: Use OpenRouter with `qwen/qwen3-embedding-8b`
-   - No: Continue to step 2
-
-2. **Does your use case demand high search quality?**
-   - Yes: Use `Xenova/bge-m3` (local, 2GB)
-   - No: Continue to step 3
-
-3. **Do you have notes in multiple languages?**
-   - Yes: Use `Xenova/multilingual-e5-small` (default)
-   - No: Use `Xenova/all-MiniLM-L6-v2` for speed
-
-### Performance Trade-offs
-
-| Scenario | Recommended Model |
-|----------|-------------------|
-| General use | multilingual-e5-small (default) |
-| Best quality, local | bge-m3 |
-| Best quality, cloud | qwen3-embedding-8b |
-| Fastest, English only | all-MiniLM-L6-v2 |
-| Limited disk space | multilingual-e5-small |
-| Offline required | Any local model |
-
-## Changing Models
-
-When you change embedding models, you **must** reindex all notes:
-
-```bash
-# After updating .env with new model:
-# Run index-notes with mode: "full"
-```
-
-Different models produce incompatible embedding vectors.
-
-## Hybrid Search
-
-apple-notes-mcp uses hybrid search (vector + keyword) by default, combining:
-
-- **Vector search**: Finds semantically similar content through embeddings
-- **Keyword search**: Finds exact matches through fulltext search
-
-Reciprocal Rank Fusion (RRF) merges the results for optimal quality.
-
-You can also use:
-- `mode: "semantic"` - Vector search only
-- `mode: "keyword"` - Keyword search only
-
-## Memory Usage
-
-| Model | Initial Load | Per-Search |
-|-------|-------------|------------|
-| e5-small | ~500MB | ~200MB |
-| bge-m3 | ~3GB | ~2GB |
-| OpenRouter | ~0 | ~0 |
-
-Local models stay in memory after first load, enabling fast subsequent queries.
+- `hybrid` (default) - vector and full-text results merged with Reciprocal Rank Fusion
+- `semantic` - vector search only
+- `keyword` - full-text search only; accents are folded and `"quoted phrases"` match as phrases, with no stemming

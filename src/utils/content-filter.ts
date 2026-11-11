@@ -64,7 +64,7 @@ const BASE64_URL_SAFE_PATTERN = /[A-Za-z0-9_-]{40,}={0,2}/g;
  */
 const SECRET_PATTERNS: Record<string, RegExp> = {
   // Private Keys
-  privateKey: /-----BEGIN (?:RSA |DSA |EC |OPENSSH |PGP )?PRIVATE KEY(?: BLOCK)?-----/,
+  privateKey: /-----BEGIN ([A-Z ]*)PRIVATE KEY( BLOCK)?-----[\s\S]*?(?:-----END \1PRIVATE KEY\2-----|$)/g,
 
   // JWT tokens
   jwt: /eyJ[A-Za-z0-9-_=]+\.[A-Za-z0-9-_=]+\.?[A-Za-z0-9-_.+/=]*/g,
@@ -179,8 +179,6 @@ export function redactSecrets(content: string): { content: string; secretsFound:
 export interface FilterConfig {
   /** Maximum Base64 ratio before skipping (default: 0.5) */
   maxBase64Ratio?: number;
-  /** Minimum meaningful content length after filtering (default: 50) */
-  minContentLength?: number;
   /** Whether to redact secrets (default: true) */
   redactSecrets?: boolean;
   /** Whether to remove Base64 blocks (default: true) */
@@ -189,7 +187,6 @@ export interface FilterConfig {
 
 const DEFAULT_CONFIG: Required<FilterConfig> = {
   maxBase64Ratio: 0.5,
-  minContentLength: 50,
   redactSecrets: true,
   removeBase64: true,
 };
@@ -244,16 +241,16 @@ export function filterContent(
     }
   }
 
-  // 5. Check if remaining content is meaningful
+  // 5. Skip only when nothing but placeholders remains
   const meaningfulContent = cleanedContent
     .replace(/\[.*?_REDACTED\]|\[ENCODED\]/g, "")
     .trim();
 
-  if (meaningfulContent.length < cfg.minContentLength) {
-    debug(`Skipping: insufficient content after filtering (${meaningfulContent.length} chars)`);
+  if (meaningfulContent.length === 0) {
+    debug("Skipping: no meaningful content after filtering");
     return {
       action: "skip",
-      reasons: ["Insufficient meaningful content after filtering"],
+      reasons: ["No meaningful content after filtering"],
     };
   }
 
@@ -261,15 +258,4 @@ export function filterContent(
   const action = reasons.length > 0 ? "filter" : "index";
 
   return { action, cleanedContent, reasons };
-}
-
-/**
- * Quick check if content should be indexed.
- * Use this for fast pre-filtering before chunking.
- */
-export function shouldIndexContent(content: string): boolean {
-  // Quick checks
-  if (hasBinaryContent(content)) return false;
-  if (getBase64Ratio(content) > 0.5) return false;
-  return true;
 }

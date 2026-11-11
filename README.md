@@ -7,344 +7,45 @@
 [![Bun](https://img.shields.io/badge/Bun-000000?logo=bun&logoColor=white)](https://bun.sh)
 [![Claude](https://img.shields.io/badge/Claude-MCP-blueviolet)](https://modelcontextprotocol.io)
 
-MCP server for Apple Notes with semantic search and CRUD operations. Claude searches, reads, creates, updates, and manages your Apple Notes through natural language.
+MCP server for Apple Notes with semantic search and CRUD operations. An MCP client such as Claude Code can search, read, create, update, and organise your Apple Notes.
 
-## Features
+- Hybrid search (vector + full-text, Reciprocal Rank Fusion) over chunked notes
+- Incremental and background indexing
+- Knowledge graph from `#tags` and `[[wiki links]]`
+- Create, update, delete, move, batch operations, and table cell edits
+- Local (HuggingFace Transformers) or OpenRouter embeddings
+- Read-only mode
 
-- **Chunk-Based Search** - Long notes split into chunks for accurate matching
-- **Query Caching** - 60x faster repeated searches
-- **Knowledge Graph** - Tags, links, and related notes discovery
-- **Hybrid Search** - Vector + keyword search with Reciprocal Rank Fusion
-- **Semantic Search** - Find notes by meaning, not keywords
-- **Full CRUD** - Create, read, update, delete, and move notes
-- **Incremental Indexing** - Re-embed only changed notes
-- **Background Index Jobs** - Async full/incremental indexing with progress polling
-- **Dual Embedding** - Local HuggingFace or OpenRouter API
+Release notes: [CHANGELOG.md](CHANGELOG.md). Some upgrades require running `index-notes` with `mode: "full"`; the changelog says when.
 
-## What's New in 1.9.0
+## Requirements
 
-- **Large library indexing** - Fetch reads note properties in bulk batches, so indexing thousands of notes finishes instead of stalling
-- **Resilient fetch** - Locked or syncing notes are retried per batch and skipped with a report instead of failing the run
-- **Cancellable reads** - Long Notes reads time out (`JXA_TIMEOUT_MS`) and cancellation actually stops the fetch
-
-## What's New in 1.8.1
-
-- **Faster `list-notes` folder filtering** - `list-notes` now queries only the requested folder instead of scanning all notes first
-- **Duplicate folder name correctness** - Folder filtering now aggregates matching folders across accounts
-- **Large vault performance** - Folder-scoped listing is significantly faster on larger note libraries
+- macOS on Apple Silicon (LanceDB has no native build for Intel Macs)
+- [Bun](https://bun.sh) >= 1.1.0. The executables run with Bun, so npm installs need Bun on `PATH` too.
+- Apple Notes, with automation permission granted when macOS asks
 
 ## Installation
-
-### npm (recommended)
 
 ```bash
 npm install -g @disco_trooper/apple-notes-mcp
 apple-notes-mcp
 ```
 
-The setup wizard guides you through:
-1. Choosing your embedding provider (local or OpenRouter)
-2. Configuring API keys if needed
-3. Setting up Claude Code integration
-4. Indexing your notes
+The first run in a terminal starts the setup wizard: embedding provider, read-only mode, auto-indexing, Claude Code integration, and an initial index. Run `apple-notes-mcp-setup` later to change settings.
 
-### From source
+From source:
 
 ```bash
 git clone https://github.com/disco-trooper/apple-notes-mcp.git
 cd apple-notes-mcp
 bun install
-bun run start
-```
-
-## Requirements
-
-- macOS (uses Apple Notes via JXA)
-- [Bun](https://bun.sh) runtime
-- Apple Notes app with notes
-
-## Quick Start
-
-Run the command after installation:
-
-```bash
-apple-notes-mcp
-```
-
-The setup wizard starts automatically on first run. Restart Claude Code after setup to use the MCP tools.
-
-## Configuration
-
-Configuration stored in `~/.apple-notes-mcp/.env`:
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `OPENROUTER_API_KEY` | OpenRouter API key (enables cloud embeddings) | - |
-| `EMBEDDING_MODEL` | Model name (local or OpenRouter) | `Xenova/multilingual-e5-small` |
-| `EMBEDDING_DIMS` | Embedding dimensions | `4096` |
-| `READONLY_MODE` | Block all write operations | `false` |
-| `INDEX_TTL` | Auto-refresh-on-search interval in seconds (disabled when unset) | - |
-| `SEARCH_REFRESH_TIMEOUT_MS` | Max time search waits for refresh before using stale index | `2000` |
-| `INDEX_JOB_RETENTION_SECONDS` | How long completed/failed index jobs remain queryable | `3600` |
-| `EMBEDDING_BATCH_SIZE` | Batch size for embedding generation | `50` |
-| `NOTES_FETCH_BATCH_SIZE` | Batch size for Notes fetch | `100` |
-| `JXA_TIMEOUT_MS` | Max time for a single Notes read in milliseconds | `120000` |
-| `DEBUG` | Enable debug logging | `false` |
-
-### Search Auto-Refresh Policy
-
-- `search-notes` does **not** force refresh on every request.
-- If `INDEX_TTL` is unset, auto-refresh is disabled and search uses the current index.
-- If `INDEX_TTL` is set, refresh runs only after TTL expiration.
-- If refresh fails or takes longer than `SEARCH_REFRESH_TIMEOUT_MS`, search falls back to stale index results instead of timing out.
-
-To reconfigure:
-
-```bash
-apple-notes-mcp setup
-# or from source:
 bun run setup
 ```
 
-### Embedding Providers
+## Claude Code setup
 
-**Local (default)**: Uses HuggingFace Transformers with `Xenova/multilingual-e5-small`. Free, runs locally, ~200MB download.
+The setup wizard adds the server to `~/.claude.json` (the existing file is backed up to `~/.claude.json.bak`). To add it by hand:
 
-**OpenRouter**: Uses cloud API. Fast, requires no local resources, needs API key from [openrouter.ai](https://openrouter.ai).
-
-See [docs/models.md](docs/models.md) for model comparison.
-
-## Tools
-
-### Search & Discovery
-
-#### `search-notes`
-Hybrid vector + fulltext search.
-
-```
-query: "meeting notes from last week"
-folder: "Work"           # optional, filter by folder
-limit: 10                # default: 20
-mode: "hybrid"           # hybrid, keyword, or semantic
-include_content: false   # include full content vs preview
-```
-
-#### `list-notes`
-List notes with sorting and filtering. Without parameters, shows index statistics.
-
-```
-sort_by: "modified"      # created, modified, or title (default: modified)
-order: "desc"            # asc or desc (default: desc)
-limit: 10                # max notes to return (1-100)
-folder: "Work"           # filter by folder (case-insensitive)
-```
-
-When `folder` is provided, the server fetches only matching folders from Apple Notes. This keeps folder-scoped requests fast even when your vault has hundreds of notes.
-
-**Examples:**
-- Get 5 newest notes: `{ sort_by: "created", order: "desc", limit: 5 }`
-- Recently modified: `{ sort_by: "modified", limit: 10 }`
-- Alphabetical in folder: `{ sort_by: "title", order: "asc", folder: "Projects" }`
-
-#### `list-folders`
-List all Apple Notes folders.
-
-#### `get-note`
-Get note content by title.
-
-```
-title: "My Note"          # or "Work/My Note" for disambiguation
-include_html: false       # include raw HTML (default: false)
-```
-
-#### `get-tables`
-Extract structured table data from a note.
-
-```
-title: "My Note"
-```
-
-Returns:
-```json
-{
-  "tableCount": 2,
-  "tables": [{
-    "index": 0,
-    "rows": [["Header1", "Header2"], ["Val1", "Val2"]],
-    "formatting": [[{"bold": true}, {"bold": true}], ...]
-  }]
-}
-```
-
-### Indexing
-
-#### `index-notes`
-Index notes for semantic search.
-
-```
-mode: "incremental"       # incremental (default) or full
-force: false              # force reindex even if TTL hasn't expired
-background: false         # optional; defaults to false (synchronous mode)
-```
-
-Use `mode: "full"` to create the chunk index for better long-note search. First full index takes longer as it generates chunks, but subsequent searches run fast.
-
-For large vaults, prefer background indexing:
-
-#### `start-index-job`
-
-```
-mode: "full"               # full or incremental
-```
-
-Returns a job snapshot with `id`, `status`, and `progress`.
-Progress updates in smaller steps across fetch, embed, and persist phases.
-
-#### `get-index-job`
-
-```
-job_id: "<job-id>"
-```
-
-Poll until status is `completed`, `failed`, or `cancelled`.
-You may see `cancelling` as a transitional status.
-
-#### `list-index-jobs`
-
-```
-limit: 10                  # optional, 1-50
-```
-
-#### `cancel-index-job`
-
-```
-job_id: "<job-id>"
-```
-
-Requests best-effort cancellation for a running job. Cancellation is cooperative:
-- A long-running step must reach a cancellation checkpoint.
-- Partial work may remain.
-- Start a new job after the current one reaches `cancelled`.
-
-#### `reindex-note`
-Re-index a single note after manual edits.
-
-```
-title: "My Note"
-```
-
-### CRUD Operations
-
-#### `create-note`
-Create a note in Apple Notes.
-
-```
-title: "New Note"
-content: "# Heading\n\nMarkdown content..."
-folder: "Work"            # optional, defaults to Notes
-```
-
-After create, update, delete, or move, the server auto-syncs vector and chunk indexes in best-effort mode.
-If sync partly fails, the tool response includes an `index sync warning`. Run `reindex-note` or `index-notes`.
-
-#### `update-note`
-Update an existing note.
-
-```
-title: "My Note"
-content: "Updated markdown content..."
-reindex: true             # re-embed after update (default: true)
-```
-
-#### `delete-note`
-Delete a note (requires confirmation).
-
-```
-title: "My Note"
-confirm: true             # must be true to delete
-```
-
-#### `move-note`
-Move a note to another folder.
-
-```
-title: "My Note"
-folder: "Archive"
-```
-
-#### `batch-delete`
-Delete multiple notes at once.
-
-```
-titles: ["Note 1", "Note 2"]  # OR folder: "Old Project"
-confirm: true                 # required for safety
-```
-
-#### `batch-move`
-Move multiple notes to a target folder.
-
-```
-titles: ["Note 1", "Note 2"]  # OR sourceFolder: "Old"
-targetFolder: "Archive"       # required
-```
-
-### Index Management
-
-#### `purge-index`
-Clear all indexed data. Use when switching embedding models or to fix corrupted index.
-
-```
-confirm: true   # required for safety
-```
-
-After purging, run `index-notes` to rebuild.
-
-### Knowledge Graph
-
-#### `list-tags`
-List all tags with occurrence counts.
-
-#### `search-by-tag`
-Find notes with a specific tag.
-
-```
-tag: "project"
-folder: "Work"    # optional
-limit: 20         # default: 20
-```
-
-#### `related-notes`
-Find notes related to a source note.
-
-```
-title: "My Note"
-types: ["tag", "link", "similar"]  # default: all
-limit: 10                          # default: 10
-```
-
-#### `export-graph`
-Export knowledge graph for visualization.
-
-```
-format: "json"     # json or graphml
-folder: "Work"     # optional filter
-```
-
-**Supported Formats:**
-- `json` - For custom visualization (D3.js, web apps)
-- `graphml` - For professional tools (Gephi, yEd, Cytoscape)
-
-## Claude Code Setup
-
-### Automatic (recommended)
-
-The setup wizard automatically adds apple-notes-mcp to Claude Code. Run `apple-notes-mcp` after installation.
-
-### Manual
-
-Add to `~/.claude.json`:
-
-For npm installation:
 ```json
 {
   "mcpServers": {
@@ -357,95 +58,80 @@ For npm installation:
 }
 ```
 
-For source installation:
-```json
-{
-  "mcpServers": {
-    "apple-notes": {
-      "command": "bun",
-      "args": ["run", "/path/to/apple-notes-mcp/src/index.ts"],
-      "env": {}
-    }
-  }
-}
-```
+For a source checkout, use `"command": "bun"` and `"args": ["run", "/path/to/apple-notes-mcp/src/index.ts"]`. Run the setup wizard once first; the server needs `~/.apple-notes-mcp/.env`. Restart Claude Code after setup.
 
-## Usage Examples
+## Configuration
 
-After setup, use natural language with Claude:
+Settings live in `~/.apple-notes-mcp/.env`. Variables in the MCP client's `env` block take precedence. Invalid values stop the server at startup.
 
-- "Search my notes for project ideas"
-- "Create a note called 'Meeting Notes' in the Work folder"
-- "What's in my note about vacation plans?"
-- "Move the 'Old Project' note to Archive"
-- "Index my notes" (after adding notes in Apple Notes)
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `OPENROUTER_API_KEY` | Use OpenRouter for embeddings (`sk-or-...`) | - |
+| `EMBEDDING_MODEL` | Embedding model | local `Xenova/multilingual-e5-small`, OpenRouter `qwen/qwen3-embedding-8b` |
+| `EMBEDDING_DIMS` | OpenRouter only; sent as `dimensions` only when set (4096 expected otherwise) | - |
+| `READONLY_MODE` | Hide and block tools that write to Apple Notes (`true`/`false`/`1`/`0`) | `false` |
+| `INDEX_TTL` | Seconds after which a search first runs an incremental index; unset or `0` disables | - |
+| `SEARCH_REFRESH_TIMEOUT_MS` | Max wait for that refresh before searching the current index | `2000` |
+| `INDEX_JOB_RETENTION_SECONDS` | How long finished index jobs stay queryable | `3600` |
+| `EMBEDDING_BATCH_SIZE` | Texts per embedding batch | `50` |
+| `NOTES_FETCH_BATCH_SIZE` | Notes per Apple Notes fetch batch | `100` |
+| `JXA_TIMEOUT_MS` | Timeout for a single Apple Notes script | `120000` |
+| `NOTES_TRASH_FOLDER` | Name of the "Recently Deleted" folder when Apple Notes uses a localized name the server does not recognise | - |
+| `DEBUG` | Debug logging to stderr (`true`/`false`/`1`/`0`) | `false` |
+
+See [docs/models.md](docs/models.md) for embedding models.
+
+## Tools
+
+Notes are addressed as `Title`, `Folder/Title`, `Account/Folder/Title`, or `id:xxx`. When several notes match, the tool returns an error listing `id:` values to use.
+
+| Category | Tool | Purpose |
+|----------|------|---------|
+| Search | `search-notes` | Hybrid, keyword, or semantic search with optional folder filter |
+| Read | `list-notes` | List notes sorted by date or title; without parameters, show index statistics |
+| Read | `get-note` | Full note content as Markdown (optionally HTML) |
+| Read | `get-tables` | Tables in a note as rows of cells |
+| Read | `list-folders` | All folders |
+| Index | `index-notes` | Incremental or full index run, optionally in the background |
+| Index | `start-index-job` | Start a background index job |
+| Index | `get-index-job` | Status and progress of a job |
+| Index | `list-index-jobs` | Recent jobs |
+| Index | `cancel-index-job` | Cancel a running job |
+| Index | `reindex-note` | Re-index one note |
+| Index | `purge-index` | Delete the local index (requires `confirm: true`) |
+| Graph | `list-tags` | Tags with occurrence counts |
+| Graph | `search-by-tag` | Notes with a tag |
+| Graph | `related-notes` | Notes related by tags, links, or similarity |
+| Graph | `export-graph` | Export the graph as JSON or GraphML |
+| Write | `create-note` | Create a note from Markdown |
+| Write | `update-note` | Replace a note's content |
+| Write | `delete-note` | Delete a note (requires `confirm: true`) |
+| Write | `move-note` | Move a note to another folder |
+| Write | `edit-table` | Edit table cells without rewriting the note |
+| Write | `batch-delete` | Delete several notes or a whole folder (requires `confirm: true`) |
+| Write | `batch-move` | Move several notes or a whole folder |
+
+Write tools are not registered when `READONLY_MODE` is on. After each write the index is updated for the affected notes; if that fails, the response includes an `index sync warning`. While an index run is in progress, the update is queued and the write returns right away.
+
+For large libraries, run `index-notes` with `background: true` and follow the job with `get-index-job`. A foreground run sends progress notifications to clients that request them.
 
 ## Troubleshooting
 
-### "Note not found"
-Use full path format `Folder/Note Title` when multiple notes share the same name.
-
-### Slow first search
-Local embeddings download the model on first use (~200MB). Subsequent searches run fast.
-
-### "READONLY_MODE is enabled"
-Set `READONLY_MODE=false` in `.env` to enable write operations.
-
-### Notes missing from search
-Run `index-notes` to update the search index. Use `mode: full` if incremental misses changes.
-
-### "iCloud account not available" / `Can't get account "iCloud"`
-This error comes from a different Apple Notes MCP implementation that uses tool `search_notes` and argument `Keywords`.
-
-This project uses:
-- tool: `search-notes`
-- argument: `query`
-
-If your client calls `search_notes` with `Keywords`, point your MCP config to `apple-notes-mcp` and restart the client.
-
-### JXA errors
-Ensure Apple Notes runs and contains notes. Grant automation permissions when prompted.
-
-### "JSON Parse error: Unexpected identifier undefined"
-This usually means the indexing process ran out of memory. Try:
-1. Close other applications to free memory
-2. Set `EMBEDDING_BATCH_SIZE=25` in `.env` to reduce memory usage
-3. Restart Apple Notes app
-4. Run `index-notes` again
-
-### Skipped notes during indexing
-Some notes may be skipped if they are:
-- **Locked** - Unlock them in Apple Notes if you want them indexed
-- **Syncing** - Wait for iCloud sync to complete, then reindex
-- **Corrupted** - Try copying content to a new note and deleting the old one
-
-The indexer will report which notes were skipped and continue with the rest.
+- **JXA errors or timeouts**: make sure Apple Notes is running and the terminal or MCP client has automation permission (System Settings → Privacy & Security → Automation). For very large folders, lower `NOTES_FETCH_BATCH_SIZE` or raise `JXA_TIMEOUT_MS`.
+- **"Embedding model changed"**: the index was built with another model or dimensions. Run `purge-index`, then `index-notes` with `mode: "full"`.
+- **Skipped notes**: locked or still-syncing notes cannot be read. Unlock them or wait for iCloud sync, then reindex.
+- **Slow first search**: the local model is downloaded and loaded on first use.
+- **Write tools missing or "tool not found"**: `READONLY_MODE` is on. Set `READONLY_MODE=false` and restart the client.
 
 ## Development
 
 ```bash
-# Type check
-bun run check
-
-# Run tests
-bun run test
-
-# Run with coverage
-bun run test:coverage
-
-# Run with debug logging
+bun run check          # type check
+bun run test           # tests (vitest; do not use `bun test`)
+bun run test:coverage  # tests with coverage
+bun run dev            # watch mode
 DEBUG=true bun run start
-
-# Watch mode
-bun run dev
 ```
-
-## Contributing
-
-PRs welcome! Please:
-- Run `bun run check` before submitting
-- Add tests for new functionality
-- Update documentation as needed
 
 ## License
 

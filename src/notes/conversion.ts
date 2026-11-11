@@ -6,24 +6,11 @@ import TurndownService from "turndown";
 import { parseTable } from "./tables.js";
 
 /**
- * Escape pipe characters in cell content for Markdown table compatibility.
- * @param cell - Cell content to escape
- * @returns Cell content with pipes escaped as \|
- */
-function escapeCell(cell: string): string {
-  return cell.replace(/\|/g, "\\|");
-}
-
-/**
  * Convert table rows to Markdown table format.
  * First row is treated as header.
  *
- * @param rows - 2D array of strings, where rows[0] is the header row
- * @returns Markdown table string with header, separator, and body rows
- *
  * @example
  * tableToMarkdown([["Name", "Value"], ["foo", "bar"]])
- * // Returns:
  * // | Name | Value |
  * // |---|---|
  * // | foo | bar |
@@ -31,38 +18,97 @@ function escapeCell(cell: string): string {
 function tableToMarkdown(rows: string[][]): string {
   if (rows.length === 0) return "";
 
-  const header = `| ${rows[0].map(escapeCell).join(" | ")} |`;
+  // Cells bypass Turndown's text escaping, so run the same escaper here; then
+  // escape pipes and keep in-cell line breaks as <br> so the row stays on one line.
+  const toLine = (row: string[]) =>
+    `| ${row
+      .map((cell) => turndownService.escape(cell).replace(/\|/g, "\\|").replace(/\n/g, "<br>"))
+      .join(" | ")} |`;
   const separator = `|${rows[0].map(() => "---").join("|")}|`;
-  const body = rows.slice(1).map((row) => `| ${row.map(escapeCell).join(" | ")} |`).join("\n");
-
-  return body ? `${header}\n${separator}\n${body}` : `${header}\n${separator}`;
+  return [toLine(rows[0]), separator, ...rows.slice(1).map(toLine)].join("\n");
 }
 
-// Initialize Turndown for HTML to Markdown conversion
+/**
+ * The DOM surface our rules touch. tsconfig has no DOM lib, so Turndown's
+ * `HTMLElement` node type is unavailable; this structural type covers it.
+ */
+interface ElementLike {
+  nodeName: string;
+  outerHTML: string;
+  getAttribute(name: string): string | null;
+  getElementsByTagName(name: string): ArrayLike<unknown>;
+}
+
+/**
+ * Placeholder for an attachment (<object> without a table, or <img>).
+ * `data:` URIs are skipped: their "filename" would be the whole base64 payload.
+ */
+function attachmentPlaceholder(element: ElementLike): string {
+  const src = element.getAttribute("src");
+  const srcName = src && !src.startsWith("data:") ? src.split("/").pop() : undefined;
+  const name =
+    element.getAttribute("data-filename") ||
+    element.getAttribute("alt") ||
+    srcName ||
+    (element.nodeName === "IMG" ? "image" : "unknown");
+  return `[Attachment: ${name}]`;
+}
+
+/** Apple Notes wraps tables in <object>; those are not attachments. */
+function isAttachment(node: ElementLike): boolean {
+  if (node.nodeName === "IMG") return true;
+  return node.nodeName === "OBJECT" && node.getElementsByTagName("table").length === 0;
+}
+
 const turndownService = new TurndownService({
   headingStyle: "atx",
   codeBlockStyle: "fenced",
   bulletListMarker: "-",
+  // Empty <object data-filename=…></object> is "blank" to Turndown and would
+  // otherwise bypass the attachments rule.
+  blankReplacement: (_content, node) => {
+    const element = node as ElementLike;
+    if (isAttachment(element)) return attachmentPlaceholder(element);
+    return "isBlock" in node && node.isBlock ? "\n\n" : "";
+  },
 });
 
-// Add custom rule to handle Apple Notes attachment placeholders
-turndownService.addRule("attachments", {
-  filter: (node) => {
-    // Apple Notes uses object tags for attachments
-    return node.nodeName === "OBJECT" || node.nodeName === "IMG";
-  },
+/*
+ * Escaping: Turndown's default escaper backslash-escapes every `[`, `]` and `_`.
+ * That turns `[[Wiki Link]]` into `\[\[Wiki Link\]\]` and `#my_tag` into
+ * `#my\_tag`, so graph extraction (outlinks, tags) never sees them. We keep the
+ * default escaping but leave `[[...]]` verbatim (unless followed by `(`, which
+ * would make it a Markdown link `[[x]](url)`) and drop `\_` between word
+ * characters (intraword `_` is never emphasis in CommonMark).
+ */
+const defaultEscape = turndownService.escape.bind(turndownService);
+const WIKI_LINK = /(\[\[[^[\]\n]+\]\](?!\())/;
+const INTRAWORD_UNDERSCORE = /(?<=[\p{L}\p{N}])((?:\\_)+)(?=[\p{L}\p{N}])/gu;
+
+turndownService.escape = (text: string): string =>
+  text
+    .split(WIKI_LINK)
+    .map((part, i) =>
+      i % 2 === 1
+        ? part
+        : defaultEscape(part).replace(INTRAWORD_UNDERSCORE, (run) => run.replace(/\\_/g, "_"))
+    )
+    .join("");
+
+// Tables: render from the raw table HTML so cells keep their own line breaks
+// and aren't run through Turndown's whitespace collapsing (cells are escaped
+// in tableToMarkdown).
+turndownService.addRule("tables", {
+  filter: "table",
   replacement: (_content, node) => {
-    // Turndown uses its own Node type, cast to access attributes
-    const element = node as unknown as {
-      getAttribute: (name: string) => string | null;
-    };
-    const filename =
-      element.getAttribute("data-filename") ||
-      element.getAttribute("alt") ||
-      element.getAttribute("src")?.split("/").pop() ||
-      "unknown";
-    return `[Attachment: ${filename}]`;
+    const markdown = tableToMarkdown(parseTable((node as ElementLike).outerHTML).rows);
+    return markdown ? `\n\n${markdown}\n\n` : "";
   },
+});
+
+turndownService.addRule("attachments", {
+  filter: (node) => isAttachment(node),
+  replacement: (_content, node) => attachmentPlaceholder(node as ElementLike),
 });
 
 /**
@@ -70,36 +116,5 @@ turndownService.addRule("attachments", {
  */
 export function htmlToMarkdown(html: string): string {
   if (!html) return "";
-
-  // Pre-process: handle Apple Notes specific markup
-  let processed = html;
-
-  // Convert tables to Markdown BEFORE attachment processing
-  // (Tables are wrapped in <object> tags in Apple Notes)
-  const tableRegex = /<object[^>]*>[\s\S]*?<table[\s\S]*?<\/table>[\s\S]*?<\/object>/gi;
-  processed = processed.replace(tableRegex, (match) => {
-    const tableData = parseTable(match);
-    if (tableData.rows.length === 0) return match;
-    return "\n\n" + tableToMarkdown(tableData.rows) + "\n\n";
-  });
-
-  // Replace attachment objects with placeholder text before Turndown
-  processed = processed.replace(
-    /<object[^>]*data-filename="([^"]*)"[^>]*>.*?<\/object>/gi,
-    "[Attachment: $1]"
-  );
-
-  // Handle inline images
-  processed = processed.replace(
-    /<img[^>]*(?:alt="([^"]*)")?[^>]*>/gi,
-    (_match, alt) => {
-      const filename = alt || "image";
-      return `[Attachment: ${filename}]`;
-    }
-  );
-
-  // Convert to Markdown
-  const markdown = turndownService.turndown(processed);
-
-  return markdown.trim();
+  return turndownService.turndown(html).trim();
 }

@@ -3,25 +3,6 @@
  */
 
 /**
- * Search result returned from the database layer.
- * Contains the full content of the note.
- */
-export interface DBSearchResult {
-  /** Apple Notes unique identifier */
-  id?: string;
-  /** Note title */
-  title: string;
-  /** Folder containing the note */
-  folder: string;
-  /** Full content of the note */
-  content: string;
-  /** Last modified date (ISO string) */
-  modified: string;
-  /** Relevance score (higher = more relevant) */
-  score: number;
-}
-
-/**
  * Search result returned to clients.
  * Contains a preview instead of full content by default.
  */
@@ -40,4 +21,12 @@ export interface SearchResult {
   modified: string;
   /** Combined relevance score (higher = more relevant) */
   score: number;
+}
+
+/** Options for listing notes (mirrors the list-notes tool input). */
+export interface ListNotesOptions {
+  sort_by?: "created" | "modified" | "title";
+  order?: "asc" | "desc";
+  limit?: number;
+  folder?: string;
 }

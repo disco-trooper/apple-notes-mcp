@@ -5,7 +5,8 @@
 
 import { getVectorStore } from "../db/lancedb.js";
 import { createDebugLogger } from "../utils/debug.js";
-import { GRAPH_LINK_WEIGHT, GRAPH_TAG_WEIGHT } from "../config/constants.js";
+import { GRAPH_LINK_WEIGHT, GRAPH_TAG_CLIQUE_MAX, GRAPH_TAG_WEIGHT } from "../config/constants.js";
+import { resolveLink } from "./extract.js";
 
 const debug = createDebugLogger("EXPORT");
 
@@ -21,7 +22,8 @@ export interface GraphNode {
 export interface GraphEdge {
   source: string;
   target: string;
-  type: "link" | "tag" | "similar";
+  /** `link` edges are directed (source links to target); `tag` edges are undirected. */
+  type: "link" | "tag";
   weight: number;
 }
 
@@ -44,7 +46,7 @@ export async function exportGraph(options: ExportOptions): Promise<GraphData | s
   debug(`Exporting graph in ${format} format`);
 
   const store = getVectorStore();
-  let records = await store.getAll();
+  let records = await store.getAllMetadata();
 
   // Filter by folder if specified
   if (folder) {
@@ -61,51 +63,52 @@ export async function exportGraph(options: ExportOptions): Promise<GraphData | s
   }));
 
   const edges: GraphEdge[] = [];
-  const nodeIds = new Set(records.map(r => r.id));
+  const seenEdges = new Set<string>();
+  const addEdge = (type: GraphEdge["type"], source: string, target: string, weight: number): void => {
+    if (source === target) return;
+    // Tag edges are undirected: key them by the sorted pair. "\0" cannot occur in ids.
+    const [a, b] = type === "tag" && target < source ? [target, source] : [source, target];
+    const key = `${type}\0${a}\0${b}`;
+    if (seenEdges.has(key)) return;
+    seenEdges.add(key);
+    edges.push({ source, target, type, weight });
+  };
 
-  // Add link edges
+  // Link edges; duplicate titles resolve to the first note
+  const byTitle = new Map<string, string>();
+  for (const record of records) {
+    const key = record.title.toLowerCase();
+    if (!byTitle.has(key)) byTitle.set(key, record.id);
+  }
   for (const record of records) {
     for (const linkTitle of record.outlinks ?? []) {
-      // Skip null/undefined links
       if (!linkTitle) continue;
-
-      const target = records.find(r => r.title.toLowerCase() === linkTitle.toLowerCase());
-      if (target && nodeIds.has(target.id)) {
-        edges.push({
-          source: record.id,
-          target: target.id,
-          type: "link",
-          weight: GRAPH_LINK_WEIGHT,
-        });
-      }
+      const targetId = resolveLink(linkTitle, byTitle);
+      if (targetId) addEdge("link", record.id, targetId, GRAPH_LINK_WEIGHT);
     }
   }
 
-  // Add tag edges (notes sharing same tag)
+  // Tag edges (notes sharing a tag)
   const tagGroups = new Map<string, string[]>();
   for (const record of records) {
     for (const tag of record.tags ?? []) {
-      if (!tagGroups.has(tag)) {
-        tagGroups.set(tag, []);
-      }
-      tagGroups.get(tag)!.push(record.id);
+      const group = tagGroups.get(tag);
+      if (group) group.push(record.id);
+      else tagGroups.set(tag, [record.id]);
     }
   }
 
-  const seenTagEdges = new Set<string>();
-  for (const [, noteIds] of tagGroups) {
-    if (noteIds.length < 2) continue;
+  for (const noteIds of tagGroups.values()) {
+    if (noteIds.length > GRAPH_TAG_CLIQUE_MAX) {
+      // Large groups: star around the first note instead of O(n²) pairs
+      for (let i = 1; i < noteIds.length; i++) {
+        addEdge("tag", noteIds[0], noteIds[i], GRAPH_TAG_WEIGHT);
+      }
+      continue;
+    }
     for (let i = 0; i < noteIds.length; i++) {
       for (let j = i + 1; j < noteIds.length; j++) {
-        const edgeKey = [noteIds[i], noteIds[j]].sort().join("-");
-        if (seenTagEdges.has(edgeKey)) continue;
-        seenTagEdges.add(edgeKey);
-        edges.push({
-          source: noteIds[i],
-          target: noteIds[j],
-          type: "tag",
-          weight: GRAPH_TAG_WEIGHT,
-        });
+        addEdge("tag", noteIds[i], noteIds[j], GRAPH_TAG_WEIGHT);
       }
     }
   }
@@ -153,7 +156,8 @@ function toGraphML(data: GraphData): string {
   }
 
   for (const edge of data.edges) {
-    lines.push(`    <edge source="${escapeXml(edge.source)}" target="${escapeXml(edge.target)}">`);
+    const directed = edge.type === "tag" ? ' directed="false"' : "";
+    lines.push(`    <edge source="${escapeXml(edge.source)}" target="${escapeXml(edge.target)}"${directed}>`);
     lines.push(`      <data key="type">${edge.type}</data>`);
     lines.push(`      <data key="weight">${edge.weight}</data>`);
     lines.push("    </edge>");

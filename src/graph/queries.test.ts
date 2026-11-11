@@ -2,155 +2,157 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { listTags, searchByTag, findRelatedNotes } from "./queries.js";
 
-// Create a shared mock store object
 const mockStore = {
-  getAll: vi.fn(),
+  getAllMetadata: vi.fn(),
+  getById: vi.fn(),
   search: vi.fn(),
 };
 
-// Mock the vector store module
 vi.mock("../db/lancedb.js", () => ({
   getVectorStore: () => mockStore,
 }));
 
-describe("listTags", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
+type Row = { id: string; title: string; folder?: string; tags?: string[]; outlinks?: string[]; vector?: number[] };
 
-  it("aggregates tags with counts", async () => {
-    mockStore.getAll.mockResolvedValue([
-      { id: "1", title: "Note 1", tags: ["project", "idea"], outlinks: [] },
-      { id: "2", title: "Note 2", tags: ["project", "todo"], outlinks: [] },
-      { id: "3", title: "Note 3", tags: ["idea"], outlinks: [] },
+/** Serve the same rows through getAllMetadata (without vectors) and getById. */
+function useRows(rows: Row[]): void {
+  const full = rows.map((r) => ({ folder: "Work", tags: [], outlinks: [], content: "", modified: "2026-01-01", ...r }));
+  mockStore.getAllMetadata.mockResolvedValue(full.map(({ vector: _vector, ...rest }) => rest));
+  mockStore.getById.mockImplementation(async (id: string) => full.find((r) => r.id === id) ?? null);
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+});
+
+describe("listTags", () => {
+  it("aggregates tags with counts, most frequent first", async () => {
+    useRows([
+      { id: "1", title: "Note 1", tags: ["project", "idea"] },
+      { id: "2", title: "Note 2", tags: ["project", "todo"] },
+      { id: "3", title: "Note 3", tags: ["idea"] },
     ]);
 
-    const result = await listTags();
-
-    expect(result).toEqual([
+    expect(await listTags()).toEqual([
       { tag: "project", count: 2 },
       { tag: "idea", count: 2 },
       { tag: "todo", count: 1 },
     ]);
   });
-
-  it("returns empty array when no tags", async () => {
-    mockStore.getAll.mockResolvedValue([
-      { id: "1", title: "Note 1", tags: [], outlinks: [] },
-    ]);
-
-    const result = await listTags();
-    expect(result).toEqual([]);
-  });
 });
 
 describe("searchByTag", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    useRows([
+      { id: "1", title: "Note 1", folder: "Work", tags: ["project"] },
+      { id: "2", title: "Note 2", folder: "Personal", tags: ["project", "idea"] },
+      { id: "3", title: "Note 3", folder: "Work", tags: ["todo"] },
+    ]);
   });
 
   it("finds notes with specific tag", async () => {
-    mockStore.getAll.mockResolvedValue([
-      { id: "1", title: "Note 1", folder: "Work", tags: ["project"], content: "Content 1", modified: "2026-01-01" },
-      { id: "2", title: "Note 2", folder: "Personal", tags: ["project", "idea"], content: "Content 2", modified: "2026-01-02" },
-      { id: "3", title: "Note 3", folder: "Work", tags: ["todo"], content: "Content 3", modified: "2026-01-03" },
-    ]);
-
     const result = await searchByTag("project");
-
-    expect(result).toHaveLength(2);
-    expect(result[0].title).toBe("Note 1");
-    expect(result[1].title).toBe("Note 2");
+    expect(result.map((r) => r.title)).toEqual(["Note 1", "Note 2"]);
   });
 
   it("filters by folder", async () => {
-    mockStore.getAll.mockResolvedValue([
-      { id: "1", title: "Note 1", folder: "Work", tags: ["project"], content: "...", modified: "2026-01-01" },
-      { id: "2", title: "Note 2", folder: "Personal", tags: ["project"], content: "...", modified: "2026-01-02" },
-    ]);
-
     const result = await searchByTag("project", { folder: "Work" });
+    expect(result.map((r) => r.title)).toEqual(["Note 1"]);
+  });
 
-    expect(result).toHaveLength(1);
-    expect(result[0].folder).toBe("Work");
+  it("matches case-insensitively and accepts a leading #", async () => {
+    expect(await searchByTag("PROJECT")).toHaveLength(2);
+    expect(await searchByTag("#project")).toHaveLength(2);
   });
 });
 
 describe("findRelatedNotes", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
   it("finds notes by shared tags", async () => {
-    mockStore.getAll.mockResolvedValue([
-      { id: "1", title: "Source", folder: "Work", tags: ["project", "idea"], outlinks: [], vector: [1,0,0] },
-      { id: "2", title: "Related", folder: "Work", tags: ["project"], outlinks: [], vector: [0,1,0] },
-      { id: "3", title: "Unrelated", folder: "Work", tags: ["todo"], outlinks: [], vector: [0,0,1] },
+    useRows([
+      { id: "1", title: "Source", tags: ["project", "idea"] },
+      { id: "2", title: "Related", tags: ["project"] },
+      { id: "3", title: "Unrelated", tags: ["todo"] },
     ]);
 
     const result = await findRelatedNotes("1", { types: ["tag"] });
 
     expect(result).toHaveLength(1);
-    expect(result[0].title).toBe("Related");
-    expect(result[0].relationship).toBe("tag");
+    expect(result[0]).toMatchObject({ title: "Related", relationship: "tag", sharedTags: ["project"] });
   });
 
-  it("finds notes by outlinks", async () => {
-    mockStore.getAll.mockResolvedValue([
-      { id: "1", title: "Source", folder: "Work", tags: [], outlinks: ["Target"], vector: [1,0,0] },
-      { id: "2", title: "Target", folder: "Work", tags: [], outlinks: [], vector: [0,1,0] },
+  it("resolves outlinks by title case-insensitively", async () => {
+    useRows([
+      { id: "1", title: "Source", outlinks: ["target"] },
+      { id: "2", title: "Target" },
     ]);
 
     const result = await findRelatedNotes("1", { types: ["link"] });
 
     expect(result).toHaveLength(1);
-    expect(result[0].title).toBe("Target");
-    expect(result[0].relationship).toBe("link");
-    expect(result[0].direction).toBe("outgoing");
+    expect(result[0]).toMatchObject({ title: "Target", relationship: "link", direction: "outgoing" });
   });
 
   it("finds backlinks", async () => {
-    mockStore.getAll.mockResolvedValue([
-      { id: "1", title: "Target", folder: "Work", tags: [], outlinks: [], vector: [1,0,0] },
-      { id: "2", title: "Source", folder: "Work", tags: [], outlinks: ["Target"], vector: [0,1,0] },
+    useRows([
+      { id: "1", title: "Target" },
+      { id: "2", title: "Source", outlinks: ["Target"] },
     ]);
 
     const result = await findRelatedNotes("1", { types: ["link"] });
 
     expect(result).toHaveLength(1);
-    expect(result[0].title).toBe("Source");
-    expect(result[0].direction).toBe("incoming");
+    expect(result[0]).toMatchObject({ title: "Source", direction: "incoming" });
+  });
+
+  it("resolves # in titles before falling back to heading anchors", async () => {
+    useRows([
+      { id: "1", title: "Source", outlinks: ["C# cheatsheet", "Note#h"] },
+      { id: "2", title: "C# cheatsheet" },
+      { id: "3", title: "C" },
+      { id: "4", title: "Note" },
+    ]);
+
+    const result = await findRelatedNotes("1", { types: ["link"] });
+
+    expect(result.map((r) => [r.title, r.direction])).toEqual([
+      ["C# cheatsheet", "outgoing"],
+      ["Note", "outgoing"],
+    ]);
+  });
+
+  it("counts [[Target#heading]] as a backlink", async () => {
+    useRows([
+      { id: "1", title: "Target" },
+      { id: "2", title: "Source", outlinks: ["Target#section"] },
+    ]);
+
+    const result = await findRelatedNotes("1", { types: ["link"] });
+
+    expect(result).toEqual([expect.objectContaining({ title: "Source", direction: "incoming" })]);
+  });
+
+  it("does not return the source note when it links to itself", async () => {
+    useRows([{ id: "1", title: "Self", outlinks: ["Self"] }]);
+    expect(await findRelatedNotes("1", { types: ["link"] })).toEqual([]);
   });
 
   it("throws NoteNotFoundError for non-existent source note", async () => {
-    mockStore.getAll.mockResolvedValue([]);
+    useRows([]);
     await expect(findRelatedNotes("nonexistent-id")).rejects.toThrow("Note not found");
   });
 
-  it("finds notes by semantic similarity", async () => {
-    mockStore.getAll.mockResolvedValue([
-      { id: "1", title: "Source", folder: "Work", tags: [], outlinks: [], vector: [1,0,0] },
-    ]);
+  it("finds notes by semantic similarity using the source vector", async () => {
+    useRows([{ id: "1", title: "Source", vector: [1, 0, 0] }]);
     mockStore.search.mockResolvedValue([
-      { id: "2", title: "Similar", folder: "Work", content: "...", modified: "2026-01-01", score: 0.95 }
+      { id: "1", title: "Source", folder: "Work", content: "", modified: "2026-01-01", score: 1 },
+      { id: "2", title: "Similar", folder: "Work", content: "", modified: "2026-01-01", score: 0.95 },
     ]);
 
     const result = await findRelatedNotes("1", { types: ["similar"] });
-    expect(result).toHaveLength(1);
-    expect(result[0].relationship).toBe("similar");
-  });
-});
 
-describe("searchByTag", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
-  it("searches tags case-insensitively", async () => {
-    mockStore.getAll.mockResolvedValue([
-      { id: "1", title: "Note", folder: "Work", tags: ["project"], content: "...", modified: "2026-01-01" },
-    ]);
-    const result = await searchByTag("PROJECT");
+    expect(mockStore.search).toHaveBeenCalledWith([1, 0, 0], expect.any(Number));
+    expect(mockStore.getAllMetadata).not.toHaveBeenCalled();
     expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ id: "2", relationship: "similar" });
   });
 });

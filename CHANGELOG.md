@@ -7,6 +7,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking changes
+
+- **Apple Silicon Mac required.** `@lancedb/lancedb` 0.41 ships no native binaries for Intel (x64) Macs; the package's `cpu` field now blocks installation there instead of failing at load
+- **Duplicate titles are an error.** `get-note` and every tool that takes a note title return an error with `id:` suggestions instead of using the first match
+- **Ambiguous folder names are an error.** A folder name that exists in several accounts must be given as `Account/Folder`
+- **Read-only mode hides write tools.** With `READONLY_MODE` on, write tools are not registered at all
+- **`search-notes` needs the chunk index.** The fallback to the old notes-table search is gone; without an index it asks you to run `index-notes`
+- **Run `index-notes` with `mode: "full"` after upgrading.** Markdown conversion, tag and link extraction, the e5 query/passage prefixes and secret redaction all changed, so content indexed by 1.9.0 no longer matches what this version indexes and searches
+- **Stricter environment validation.** Numeric env vars must be positive integers (`INDEX_TTL` non-negative); invalid values stop the server at startup
+
+### Added
+
+- Tool annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`) on every tool
+- `getNoteById` lookup: search results, `related-notes` and post-write index sync address notes by Apple Notes id
+- Folders can be addressed as a leaf name, a nested path (`Parent/Child`) or `Account/Folder`
+- Embedding model guard: an incremental index run fails with a clear message when the configured embedding model or dimensions differ from the ones the index was built with
+- In-process index lock: `index-notes`, background jobs, `reindex-note`, `purge-index` and post-write sync no longer write the index concurrently; search auto-refresh is skipped while indexing runs
+- `search-notes` results include the note `id`
+- `CHANGELOG.md` ships in the npm package
+- `NOTES_TRASH_FOLDER` environment variable for a localized "Recently Deleted" folder name the server does not recognise
+- `index-notes` sends progress notifications when the client asks for them
+- CI workflow running type check and tests on macOS
+
+### Changed
+
+- `READONLY_MODE` and `DEBUG` accept `true`/`false`/`1`/`0` (case-insensitive)
+- Titles containing `/` resolve as titles; `Folder/Title` is tried as a folder-scoped lookup as well
+- `create-note` no longer duplicates the title when the content starts with it (Apple Notes writes the title as the first line itself). The response says when Apple Notes chose a different title
+- Notes in "Recently Deleted" (also under its localized names, or the name set in `NOTES_TRASH_FOLDER`) are no longer listed, indexed or matched by title, and folder lookups never target it (`id:` lookups still reach them)
+- `delete-note` requires `confirm: true` in the input schema (any other value is rejected before the handler runs)
+- `index-notes` syncs both the notes table (tags, links, related notes) and the chunk table (search) by note id in one run; incremental mode compares each note's `modified` date with the stored one
+- `search-notes` with `include_content: true` reads the note by id
+- Local e5 models embed search queries with the `query:` prefix (documents keep `passage:`); query embeddings are cached per provider and model
+- `EMBEDDING_DIMS` is sent to OpenRouter only when set; without it the model's native size is used and expected to be 4096 (the default model's size)
+- Settings from the MCP client's `env` block take precedence over `~/.apple-notes-mcp/.env`, which is now loaded before any module reads the environment
+- Tables convert to Markdown tables, attachments and images to `[Attachment: name]`, and `[[wiki links]]` and `#tags` with `_` survive the HTML to Markdown conversion
+- Hashtags: Unicode tags (`#práce`) and tags with `_` (`#my_tag`) are extracted whole; numeric (`#42`), single-character and hex-colour-like tags (`#ddd`, `#ffffff`, also words such as `#cafe`) are ignored, as are URL fragments
+- `[[Title|alias]]` and `[[Title#heading]]` links resolve to `Title`
+- Private key blocks are redacted in full (previously only the header line); short notes are no longer skipped, only notes with no content left after filtering
+- Chunks overlap by the configured amount and never exceed the chunk size
+- Error messages from domain errors are returned in full; internal errors are reduced to a generic message
+- Setup wizard writes `~/.apple-notes-mcp/.env` with mode 0600 and keeps keys it does not manage; `~/.claude.json` is backed up, written atomically, and left untouched when it cannot be parsed
+- `engines` requires Bun >= 1.1.0 (replaces `node >= 18`)
+- Upgraded `@lancedb/lancedb` to 0.41 (see Breaking changes)
+- Keyword search index stores token positions, so quoted phrases match as phrases. No stemming or stop-word removal; accents are folded (`prilis` matches `příliš`). Indexes written by 1.9.0 still open; the keyword index is rebuilt on the next index run
+- Upgraded `@modelcontextprotocol/sdk` to 1.32
+- Faster indexing: only chunks are embedded (a note's vector is the normalized mean of its chunk vectors), chunk vectors stored by the same embedding model are reused for unchanged chunk text in both full and incremental runs, and the local model embeds in pipeline batches of 8. `index-notes` reports embedded and reused chunk counts
+- Write tools no longer wait for a running index; the index update for the written notes is queued and the response says so
+- Search auto-refresh only updates an existing index and never builds a missing one
+- `list-notes` accepts `Account/Folder` and nested folder paths
+- Folder-mode `batch-delete` and `batch-move` process notes in groups
+
+### Fixed
+
+- Settings in `~/.apple-notes-mcp/.env` were ignored by modules that read the environment at import time (OpenRouter key, model, dimensions)
+- `[[links]]` were escaped by the Markdown conversion, so outlinks were never extracted; `#my_tag` was indexed as `my` and `#práce` as `pr`
+- Tables in notes were flattened to one line in Markdown output
+- `edit-table` edits cells by position, so a cell or table with the same HTML as an earlier one no longer gets the edit instead; table cell text is entity-decoded in `get-tables`
+- Large note bodies no longer fail with `E2BIG`: scripts go to `osascript` via stdin
+- OpenRouter: honours `Retry-After`, does not retry non-retryable errors, does not sleep after the last attempt, and keeps results in input order
+- Empty `tags`/`outlinks` columns no longer break LanceDB table creation (explicit Arrow schemas)
+- Filter values containing quotes are escaped correctly in index deletes and updates
+- Index rows are keyed by note id, so notes with the same title in different folders no longer overwrite each other
+- Incremental indexing keeps the index rows of notes and folders that failed to read, and picks up folder changes
+- `batch-move` validates the target folder before moving anything, so a missing or ambiguous folder is an error instead of "moved 0, failed all"
+- Table cells keep literal Markdown characters (`*`, `_`, `` ` ``, `[..](..)`) through `get-note` → `update-note`
+- Wiki links to titles containing `#` (`[[C# cheatsheet]]`) resolve to the full title; tags inside italics are extracted
+- OpenRouter: a 402 with `Retry-After` is retried, and 503 honours `Retry-After`
+- Blank values in the MCP client's `env` block no longer shadow settings from `~/.apple-notes-mcp/.env`
+- Setup wizard downloads and indexes with the local model you chose instead of the default one
+- Hybrid search fetches enough candidates from both rankings, so a folder filter no longer returns fewer results than the limit
+- Background index job errors hide internal details like other tool errors
+
+### Removed
+
+- `force` parameter of `index-notes`
+- Legacy whole-note search path; `search-notes` always uses chunk search
+- `run-jxa` dependency; all Apple Notes access goes through one killable `osascript` runner
+
 ## [1.9.0] - 2026-09-08
 
 ### Added

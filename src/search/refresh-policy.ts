@@ -3,31 +3,31 @@
  */
 
 /**
- * Decide whether auto-refresh should run based on TTL.
+ * Parse INDEX_TTL (seconds). Returns null when unset or not a positive integer,
+ * which disables auto-refresh.
+ */
+export function parseIndexTtlSeconds(raw: string | undefined): number | null {
+  if (!raw) {
+    return null;
+  }
+  const ttlSeconds = Number.parseInt(raw, 10);
+  return Number.isFinite(ttlSeconds) && ttlSeconds > 0 ? ttlSeconds : null;
+}
+
+/**
+ * Decide whether auto-refresh should run.
  *
- * Rules:
- * - No TTL configured => disabled
- * - Invalid/zero TTL => disabled
- * - Empty index (no indexed timestamp) => enabled
- * - Otherwise run only when TTL has expired
+ * - No index baseline (lastRefreshMs null) => skip: auto-refresh only keeps an
+ *   existing index fresh; building one from scratch is left to index-notes
+ * - Otherwise run only when the TTL has expired
  */
 export function shouldAutoRefreshByTtl(
-  ttlSecondsRaw: string | undefined,
+  ttlSeconds: number,
   nowMs: number,
-  lastIndexedAtMs: number | null
+  lastRefreshMs: number | null
 ): boolean {
-  if (!ttlSecondsRaw) {
+  if (lastRefreshMs === null) {
     return false;
   }
-
-  const ttlSeconds = Number.parseInt(ttlSecondsRaw, 10);
-  if (!Number.isFinite(ttlSeconds) || ttlSeconds <= 0) {
-    return false;
-  }
-
-  if (lastIndexedAtMs === null) {
-    return true;
-  }
-
-  return nowMs - lastIndexedAtMs >= ttlSeconds * 1000;
+  return nowMs - lastRefreshMs >= ttlSeconds * 1000;
 }

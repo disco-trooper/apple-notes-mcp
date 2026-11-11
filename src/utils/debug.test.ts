@@ -1,41 +1,43 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
+import { createDebugLogger } from "./debug.js";
 
-describe("debug utility", () => {
-  const originalEnv = process.env.DEBUG;
-
-  beforeEach(() => {
-    vi.resetModules();
-  });
+describe("createDebugLogger", () => {
+  const originalDebug = process.env.DEBUG;
 
   afterEach(() => {
-    if (originalEnv !== undefined) {
-      process.env.DEBUG = originalEnv;
+    vi.restoreAllMocks();
+    if (originalDebug !== undefined) {
+      process.env.DEBUG = originalDebug;
     } else {
       delete process.env.DEBUG;
     }
   });
 
-  it("createDebugLogger returns a function", async () => {
-    const { createDebugLogger } = await import("./debug.js");
-    const logger = createDebugLogger("TEST");
-    expect(typeof logger).toBe("function");
+  it.each([
+    ["true", 1],
+    ["1", 1],
+    ["false", 0],
+    ["0", 0],
+  ])("DEBUG=%s logs %i time(s) to stderr", (value, calls) => {
+    const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    process.env.DEBUG = value;
+
+    createDebugLogger("TEST")("hello");
+
+    expect(stderr).toHaveBeenCalledTimes(calls);
+    expect(log).not.toHaveBeenCalled();
   });
 
-  it("isDebugEnabled returns false when DEBUG not set", async () => {
+  it("reads DEBUG at call time", () => {
+    const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
     delete process.env.DEBUG;
-    const { isDebugEnabled } = await import("./debug.js");
-    expect(isDebugEnabled()).toBe(false);
-  });
+    const logger = createDebugLogger("TEST");
 
-  it("isDebugEnabled returns true when DEBUG is true", async () => {
+    logger("off");
     process.env.DEBUG = "true";
-    const { isDebugEnabled } = await import("./debug.js");
-    expect(isDebugEnabled()).toBe(true);
-  });
+    logger("on");
 
-  it("isDebugEnabled returns false when DEBUG is false", async () => {
-    process.env.DEBUG = "false";
-    const { isDebugEnabled } = await import("./debug.js");
-    expect(isDebugEnabled()).toBe(false);
+    expect(stderr).toHaveBeenCalledTimes(1);
   });
 });

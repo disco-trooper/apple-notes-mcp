@@ -1,134 +1,98 @@
 import { describe, it, expect, vi } from "vitest";
 import { createIndexJobManager } from "./job-manager.js";
 import { IndexCancelledError } from "./contracts.js";
+import type { IndexResult } from "../search/indexer.js";
+
+const RESULT: IndexResult = { total: 1, indexed: 1, timeMs: 50 };
 
 async function flushPromises(): Promise<void> {
-  await Promise.resolve();
-  await Promise.resolve();
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+}
+
+function never<T>(): Promise<T> {
+  return new Promise<T>(() => {
+    // keep the job running
+  });
 }
 
 describe("job-manager", () => {
-  it("starts a job and returns completed status", async () => {
+  it("runs a queued job to completion", async () => {
     const manager = createIndexJobManager({
-      indexNotes: vi.fn().mockImplementation(async (_mode, options) => {
-        options?.onProgress?.({
-          stage: "fetch",
-          current: 1,
-          total: 1,
-          message: "Fetched",
-        });
-        return {
-          total: 1,
-          indexed: 1,
-          errors: 0,
-          timeMs: 50,
-        };
-      }),
-      fullChunkIndex: vi.fn().mockResolvedValue({
-        totalNotes: 1,
-        totalChunks: 2,
-        indexed: 2,
-        timeMs: 30,
-      }),
-      now: () => Date.now(),
+      indexNotes: vi.fn().mockResolvedValue(RESULT),
       newId: () => "job-1",
     });
 
-    const job = manager.start({ mode: "incremental" });
-    const initial = manager.get(job.id);
-    expect(initial?.status).toBe("queued");
+    const { job, reused } = manager.start({ mode: "incremental" });
+    expect(reused).toBe(false);
+    expect(manager.get(job.id)?.status).toBe("queued");
 
     await flushPromises();
 
     const final = manager.get(job.id);
     expect(final?.status).toBe("completed");
     expect(final?.progress.percent).toBe(100);
+    expect(final?.result).toEqual(RESULT);
   });
 
-  it("deduplicates concurrent full jobs", async () => {
-    const unresolved = new Promise(() => {
-      // intentionally unresolved for dedupe check
-    });
-
+  it("returns the active job, flagged as reused, for any mode", () => {
     const manager = createIndexJobManager({
-      indexNotes: vi.fn().mockReturnValue(unresolved),
-      fullChunkIndex: vi.fn().mockResolvedValue({
-        totalNotes: 1,
-        totalChunks: 1,
-        indexed: 1,
-        timeMs: 1,
-      }),
-      now: () => Date.now(),
-      newId: () => crypto.randomUUID(),
-    });
-
-    const first = manager.start({ mode: "full" });
-    const second = manager.start({ mode: "full" });
-    expect(first.id).toBe(second.id);
-  });
-
-  it("deduplicates active jobs across modes", async () => {
-    const unresolved = new Promise(() => {
-      // keep running
-    });
-
-    const manager = createIndexJobManager({
-      indexNotes: vi.fn().mockReturnValue(unresolved),
-      fullChunkIndex: vi.fn(),
-      now: () => Date.now(),
-      newId: () => crypto.randomUUID(),
+      indexNotes: vi.fn().mockReturnValue(never()),
     });
 
     const full = manager.start({ mode: "full" });
     const incremental = manager.start({ mode: "incremental" });
 
-    expect(incremental.id).toBe(full.id);
+    expect(incremental.reused).toBe(true);
+    expect(incremental.job.id).toBe(full.job.id);
+    expect(incremental.job.mode).toBe("full");
   });
 
   it("tracks failed job state and error message", async () => {
     const manager = createIndexJobManager({
       indexNotes: vi.fn().mockRejectedValue(new Error("boom")),
-      fullChunkIndex: vi.fn(),
-      now: () => Date.now(),
       newId: () => "job-fail",
     });
 
-    const job = manager.start({ mode: "incremental" });
+    const { job } = manager.start({ mode: "incremental" });
     await flushPromises();
 
     const final = manager.get(job.id);
     expect(final?.status).toBe("failed");
-    expect(final?.error).toBeTruthy();
+    expect(final?.error).toBe("boom");
   });
 
-  it("updates running progress beyond initial 10 percent", async () => {
+  it("hides programming errors from the job error message", async () => {
     const manager = createIndexJobManager({
-      indexNotes: vi.fn().mockImplementation((_mode, options) => {
-        options?.onProgress?.({
-          stage: "embed",
-          current: 1,
-          total: 2,
-          message: "Embedded batch 1/2",
-        });
-
-        return new Promise(() => {
-          // keep running so we can inspect intermediate progress
-        });
-      }),
-      fullChunkIndex: vi.fn(),
-      now: () => Date.now(),
-      newId: () => "job-progress",
+      indexNotes: vi.fn().mockRejectedValue(new TypeError("Cannot read properties of undefined (reading 'id')")),
     });
 
-    const job = manager.start({ mode: "incremental" });
+    const { job } = manager.start({ mode: "incremental" });
     await flushPromises();
 
-    const running = manager.get(job.id);
-    expect(running?.status).toBe("running");
-    expect((running?.progress.percent ?? 0)).toBeGreaterThan(10);
+    expect(manager.get(job.id)?.error).toBe("An internal error occurred");
   });
 
-  it("marks job as cancelled when cancel is requested", async () => {
+  it("never reports progress going backwards", async () => {
+    let emit!: (stage: "persist" | "fetch", current: number, total: number) => void;
+    const manager = createIndexJobManager({
+      indexNotes: vi.fn().mockImplementation((_mode, options) => {
+        emit = (stage, current, total) => options?.onProgress?.({ stage, current, total, message: stage });
+        return never();
+      }),
+    });
+
+    const { job } = manager.start({ mode: "incremental" });
+    await flushPromises();
+
+    emit("persist", 1, 2);
+    const atPersist = manager.get(job.id)?.progress.percent ?? 0;
+    expect(atPersist).toBeGreaterThan(80);
+
+    emit("fetch", 1, 10);
+    expect(manager.get(job.id)?.progress.percent).toBe(atPersist);
+  });
+
+  it("marks a job cancelled when the indexer stops on abort", async () => {
     const manager = createIndexJobManager({
       indexNotes: vi.fn().mockImplementation((_mode, options) => {
         return new Promise((_resolve, reject) => {
@@ -137,49 +101,55 @@ describe("job-manager", () => {
           });
         });
       }),
-      fullChunkIndex: vi.fn(),
-      now: () => Date.now(),
-      newId: () => "job-cancel",
     });
 
-    const started = manager.start({ mode: "incremental" });
+    const { job } = manager.start({ mode: "incremental" });
     await flushPromises();
 
-    const cancelling = manager.cancel(started.id);
-    expect(cancelling?.status).toBe("cancelling");
+    expect(manager.cancel(job.id)?.status).toBe("cancelling");
 
     await flushPromises();
-    const cancelled = manager.get(started.id);
-    expect(cancelled?.status).toBe("cancelled");
+    expect(manager.get(job.id)?.status).toBe("cancelled");
   });
 
-  it("returns null when cancelling unknown job", async () => {
+  it("stays cancelled when the indexer finishes despite the abort", async () => {
+    let finish!: () => void;
+    const manager = createIndexJobManager({
+      indexNotes: vi.fn().mockImplementation(
+        () =>
+          new Promise<IndexResult>((resolve) => {
+            finish = () => resolve(RESULT);
+          })
+      ),
+    });
+
+    const { job } = manager.start({ mode: "full" });
+    await flushPromises();
+    manager.cancel(job.id);
+    finish();
+    await flushPromises();
+
+    const final = manager.get(job.id);
+    expect(final?.status).toBe("cancelled");
+    expect(final?.progress.message).toContain("written");
+    expect(final?.result).toEqual(RESULT);
+  });
+
+  it("returns null when cancelling unknown job", () => {
     const manager = createIndexJobManager();
     expect(manager.cancel("missing")).toBeNull();
   });
 
   it("does not start a queued job after cancel", async () => {
-    const indexNotes = vi.fn().mockResolvedValue({
-      total: 0,
-      indexed: 0,
-      errors: 0,
-      timeMs: 1,
-    });
+    const indexNotes = vi.fn().mockResolvedValue(RESULT);
+    const manager = createIndexJobManager({ indexNotes });
 
-    const manager = createIndexJobManager({
-      indexNotes,
-      fullChunkIndex: vi.fn(),
-      now: () => Date.now(),
-      newId: () => "q1",
-    });
-
-    const started = manager.start({ mode: "incremental" });
-    const cancelled = manager.cancel(started.id);
-    expect(cancelled?.status).toBe("cancelled");
+    const { job } = manager.start({ mode: "incremental" });
+    expect(manager.cancel(job.id)?.status).toBe("cancelled");
 
     await flushPromises();
 
     expect(indexNotes).not.toHaveBeenCalled();
-    expect(manager.get(started.id)?.status).toBe("cancelled");
+    expect(manager.get(job.id)?.status).toBe("cancelled");
   });
 });

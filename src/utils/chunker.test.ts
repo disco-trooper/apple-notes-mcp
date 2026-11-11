@@ -1,36 +1,20 @@
 import { describe, expect, it } from "vitest";
-import {
-  chunkText,
-  type ChunkOptions,
-  DEFAULT_CHUNK_OPTIONS,
-  SEPARATORS,
-  findSplitPoint,
-} from "./chunker.js";
+import { chunkText, type ChunkOptions, findSplitPoint } from "./chunker.js";
+
+/** Deterministic pseudo-random prose with mixed separators. */
+function sampleText(length: number, seed = 1): string {
+  const words = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta"];
+  const seps = [" ", " ", " ", ", ", ". ", "\n", "\n\n", " "];
+  let out = "";
+  let s = seed;
+  while (out.length < length) {
+    s = (s * 1103515245 + 12345) % 2147483648;
+    out += words[s % words.length] + seps[(s >> 8) % seps.length];
+  }
+  return out.slice(0, length);
+}
 
 describe("chunker", () => {
-  describe("exports", () => {
-    it("exports SEPARATORS array with correct order", () => {
-      expect(SEPARATORS).toEqual([
-        "\n\n",
-        "\n",
-        ". ",
-        "! ",
-        "? ",
-        "; ",
-        ", ",
-        " ",
-        "",
-      ]);
-    });
-
-    it("exports DEFAULT_CHUNK_OPTIONS with correct values", () => {
-      expect(DEFAULT_CHUNK_OPTIONS).toEqual({
-        chunkSize: 500,
-        overlap: 100,
-      });
-    });
-  });
-
   describe("findSplitPoint", () => {
     it("finds paragraph boundary near target", () => {
       const text = "First paragraph.\n\nSecond paragraph.";
@@ -61,6 +45,17 @@ describe("chunker", () => {
       const target = 8;
       const result = findSplitPoint(text, target);
       expect(result).toBe(8);
+    });
+
+    it("never splits after the target", () => {
+      const text = "aaaaaaaaaa bbbbbbbbbb\n\ncccc";
+      expect(findSplitPoint(text, 15)).toBe(11);
+    });
+
+    it("does not search before minPos", () => {
+      const text = "abcdefgh ijklmnopqrst";
+      expect(findSplitPoint(text, 12)).toBe(9);
+      expect(findSplitPoint(text, 12, 6)).toBe(12);
     });
   });
 
@@ -177,6 +172,50 @@ describe("chunker", () => {
         // Next chunk should start before or at current chunk's end (overlap)
         expect(result[i + 1].startPos).toBeLessThanOrEqual(result[i].endPos);
       }
+    });
+
+    describe("invariants on long text", () => {
+      const cases: Array<[string, ChunkOptions]> = [
+        ["defaults", { chunkSize: 500, overlap: 100 }],
+        ["small", { chunkSize: 60, overlap: 15 }],
+        ["no overlap", { chunkSize: 80, overlap: 0 }],
+      ];
+
+      it.each(cases)("%s: chunks fit, overlap exactly and cover the text", (_name, options) => {
+        const text = sampleText(5000, 7);
+        const result = chunkText(text, options);
+
+        expect(result[0].startPos).toBe(0);
+        expect(result[result.length - 1].endPos).toBe(text.length);
+        for (const chunk of result) {
+          expect(chunk.content.length).toBeLessThanOrEqual(options.chunkSize);
+          expect(chunk.content).toBe(text.slice(chunk.startPos, chunk.endPos));
+        }
+        for (let i = 1; i < result.length; i++) {
+          expect(result[i].startPos).toBe(result[i - 1].endPos - options.overlap);
+        }
+      });
+
+      it("makes progress when overlap is not smaller than chunk size", () => {
+        const text = "x".repeat(50);
+        const result = chunkText(text, { chunkSize: 10, overlap: 10 });
+
+        for (let i = 1; i < result.length; i++) {
+          expect(result[i].startPos).toBeGreaterThan(result[i - 1].startPos);
+        }
+        expect(result[result.length - 1].endPos).toBe(50);
+      });
+
+      it("never splits a surrogate pair", () => {
+        const text = "😀".repeat(200); // no separators, every char is a pair
+        const result = chunkText(text, { chunkSize: 25, overlap: 5 });
+
+        for (const chunk of result) {
+          expect(chunk.content.length).toBeLessThanOrEqual(25);
+          expect(chunk.content).not.toMatch(/^[\uDC00-\uDFFF]|[\uD800-\uDBFF]$/);
+        }
+        expect(result[result.length - 1].endPos).toBe(text.length);
+      });
     });
   });
 });

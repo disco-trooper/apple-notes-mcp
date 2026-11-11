@@ -1,100 +1,27 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const mockVectorStore = {
-  deleteByFolderAndTitle: vi.fn(),
-  deleteByIdAndFolderAndTitle: vi.fn(),
-};
-
-const mockChunkStore = {
-  deleteChunksByNoteIds: vi.fn(),
-};
-
-vi.mock("../db/lancedb.js", () => ({
-  getVectorStore: vi.fn(() => mockVectorStore),
-  getChunkStore: vi.fn(() => mockChunkStore),
-}));
-
 vi.mock("./indexer.js", () => ({
-  reindexNote: vi.fn(),
+  syncNotesById: vi.fn(),
+  removeNotesFromIndex: vi.fn(),
 }));
 
-vi.mock("./chunk-indexer.js", () => ({
-  hasChunkIndex: vi.fn().mockResolvedValue(true),
-  updateChunksForNotes: vi.fn(),
-}));
-
-vi.mock("../notes/read.js", () => ({
-  getNoteById: vi.fn().mockResolvedValue({
-    id: "note-1",
-    title: "A",
-    folder: "Work",
-    content: "Content",
-    htmlContent: "<p>Content</p>",
-    created: "2026-01-01T00:00:00.000Z",
-    modified: "2026-01-01T00:00:00.000Z",
-  }),
-}));
-
-vi.mock("../utils/debug.js", () => ({
-  createDebugLogger: vi.fn(() => vi.fn()),
-}));
+import {
+  QUEUED_SYNC_WARNING,
+  syncAfterBatchDelete,
+  syncAfterCreate,
+  syncAfterNoteChange,
+  syncAfterUpdate,
+} from "./write-sync.js";
+import { removeNotesFromIndex, syncNotesById } from "./indexer.js";
+import { withIndexLock } from "../indexing/lock.js";
 
 describe("write-sync", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it("syncAfterCreate reindexes vector and chunks by note id", async () => {
-    const { syncAfterCreate } = await import("./write-sync.js");
-    const { reindexNote } = await import("./indexer.js");
-    const { updateChunksForNotes } = await import("./chunk-indexer.js");
-
-    const result = await syncAfterCreate({
-      id: "note-1",
-      title: "A",
-      folder: "Work",
-      requestedTitle: "A",
-      titleChanged: false,
-    });
-
-    expect(reindexNote).toHaveBeenCalledWith("id:note-1");
-    expect(updateChunksForNotes).toHaveBeenCalled();
-    expect(result.ok).toBe(true);
-  });
-
-  it("syncAfterDelete removes vector and chunk records", async () => {
-    const { syncAfterDelete } = await import("./write-sync.js");
-
-    const result = await syncAfterDelete({
-      id: "note-1",
-      title: "A",
-      folder: "Work",
-    });
-
-    expect(mockVectorStore.deleteByIdAndFolderAndTitle).toHaveBeenCalledWith("note-1", "Work", "A");
-    expect(mockChunkStore.deleteChunksByNoteIds).toHaveBeenCalledWith(["note-1"]);
-    expect(result.ok).toBe(true);
-  });
-
-  it("syncAfterMove deletes old folder/title and reindexes by id", async () => {
-    const { syncAfterMove } = await import("./write-sync.js");
-    const { reindexNote } = await import("./indexer.js");
-
-    const result = await syncAfterMove({
-      id: "note-1",
-      title: "A",
-      fromFolder: "Work",
-      toFolder: "Archive",
-    });
-
-    expect(mockVectorStore.deleteByIdAndFolderAndTitle).toHaveBeenCalledWith("note-1", "Work", "A");
-    expect(reindexNote).toHaveBeenCalledWith("id:note-1");
-    expect(result.ok).toBe(true);
-  });
-
-  it("syncAfterUpdate deletes stale title entry when renamed", async () => {
-    const { syncAfterUpdate } = await import("./write-sync.js");
-    const { reindexNote } = await import("./indexer.js");
+  it("re-syncs a renamed note by id, not by title", async () => {
+    vi.mocked(syncNotesById).mockResolvedValue([]);
 
     const result = await syncAfterUpdate({
       id: "note-1",
@@ -104,30 +31,86 @@ describe("write-sync", () => {
       titleChanged: true,
     });
 
-    expect(mockVectorStore.deleteByIdAndFolderAndTitle).toHaveBeenCalledWith("note-1", "Work", "Old A");
-    expect(reindexNote).toHaveBeenCalledWith("id:note-1");
-    expect(result.ok).toBe(true);
+    expect(syncNotesById).toHaveBeenCalledWith(["note-1"]);
+    expect(result).toEqual({ ok: true, warnings: [] });
   });
 
-  it("reindexes before stale cleanup on move", async () => {
-    const { syncAfterMove } = await import("./write-sync.js");
-    const { reindexNote } = await import("./indexer.js");
+  it("reports notes that vanished before they could be indexed", async () => {
+    vi.mocked(syncNotesById).mockResolvedValue(["note-1"]);
 
-    const order: string[] = [];
-    vi.mocked(reindexNote).mockImplementation(async () => {
-      order.push("reindex");
-    });
-    mockVectorStore.deleteByIdAndFolderAndTitle.mockImplementation(async () => {
-      order.push("cleanup");
-    });
-
-    await syncAfterMove({
+    const result = await syncAfterCreate({
       id: "note-1",
       title: "A",
-      fromFolder: "Work",
-      toFolder: "Archive",
+      folder: "Work",
+      requestedTitle: "A",
+      titleChanged: false,
     });
 
-    expect(order).toEqual(["reindex", "cleanup"]);
+    expect(result.ok).toBe(false);
+    expect(result.warnings[0]).toContain("note-1");
+  });
+
+  it("turns index failures into warnings instead of throwing", async () => {
+    vi.mocked(removeNotesFromIndex).mockRejectedValue(new Error("table locked"));
+
+    const result = await syncAfterBatchDelete(["a", "b"]);
+
+    expect(removeNotesFromIndex).toHaveBeenCalledWith(["a", "b"]);
+    expect(result).toEqual({ ok: false, warnings: ["index-delete: table locked"] });
+  });
+
+  it("queues the sync behind a running index job instead of waiting for it", async () => {
+    const synced: string[][] = [];
+    vi.mocked(syncNotesById).mockImplementation((ids) =>
+      withIndexLock(async () => {
+        synced.push(ids);
+        return [];
+      })
+    );
+    let release!: () => void;
+    const job = withIndexLock(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        })
+    );
+
+    const result = await syncAfterNoteChange("note-1");
+
+    expect(result).toEqual({ ok: true, warnings: [QUEUED_SYNC_WARNING] });
+    expect(synced).toEqual([]);
+
+    release();
+    await job;
+    await withIndexLock(async () => undefined);
+    expect(synced).toEqual([["note-1"]]);
+  });
+
+  it("never leaves a queued sync failure unobserved", async () => {
+    vi.mocked(removeNotesFromIndex).mockImplementation(() =>
+      withIndexLock(async () => {
+        throw new Error("table locked");
+      })
+    );
+    let release!: () => void;
+    const job = withIndexLock(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        })
+    );
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+
+    const result = await syncAfterBatchDelete(["a"]);
+    release();
+    await job;
+    await withIndexLock(async () => undefined).catch(() => undefined);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    process.off("unhandledRejection", unhandled);
+
+    expect(result.warnings).toEqual([QUEUED_SYNC_WARNING]);
+    expect(removeNotesFromIndex).toHaveBeenCalledWith(["a"]);
+    expect(unhandled).not.toHaveBeenCalled();
   });
 });

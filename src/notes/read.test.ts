@@ -1,18 +1,15 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // Mock the killable JXA runner before importing the read module: every
-// read.ts fetch goes through it. resolve.ts still imports run-jxa directly,
-// so that seam stays mocked too for the resolveNoteTitle tests below.
+// read.ts and resolve.ts call goes through executeJxa.
 vi.mock("./jxa-runner.js", () => ({
-  runJxaWithKill: vi.fn(),
-}));
-vi.mock("run-jxa", () => ({
-  runJxa: vi.fn(),
+  executeJxa: vi.fn(),
 }));
 
-import { runJxaWithKill } from "./jxa-runner.js";
-import { runJxa } from "run-jxa";
-import { getAllNotes, getNoteByTitle, getAllFolders, resolveNoteTitle, listNotes, getNoteMetadataByFolder, getNotesInFolder } from "./read.js";
+import { executeJxa } from "./jxa-runner.js";
+import { getAllNotes, getNoteByTitle, getAllFolders, listNotes, getNoteMetadataByFolder, fetchFolderBatched } from "./read.js";
+import { resolveNoteTitle, buildLookupCandidates } from "./resolve.js";
+import { DuplicateNoteError } from "../errors/index.js";
 
 /** Slim note shape used across the list/metadata tests below. */
 interface FolderedNote {
@@ -97,8 +94,8 @@ function mockFolderedNotes(allNotes: FolderedNote[]) {
     list.push(note);
     byFolder.set(note.folder, list);
   }
-  vi.mocked(runJxaWithKill).mockReset();
-  vi.mocked(runJxaWithKill).mockImplementation(async (...args: Parameters<typeof runJxaWithKill>) => {
+  vi.mocked(executeJxa).mockReset();
+  vi.mocked(executeJxa).mockImplementation(async (...args: Parameters<typeof executeJxa>) => {
     const src = String(args[0]);
     if (src.includes("folders.name()")) {
       const keys = [...byFolder.keys()];
@@ -131,8 +128,8 @@ describe("getAllNotes", () => {
   it("should return empty array when no notes exist", async () => {
     // New enumerate shape with usable counts: no re-enumerate retry, and the
     // persistent mock cannot leak a stale implementation from another test.
-    vi.mocked(runJxaWithKill).mockReset();
-    vi.mocked(runJxaWithKill).mockResolvedValue(JSON.stringify({ names: [], counts: [] }));
+    vi.mocked(executeJxa).mockReset();
+    vi.mocked(executeJxa).mockResolvedValue(JSON.stringify({ names: [], counts: [] }));
 
     const notes = await getAllNotes();
     expect(notes).toEqual([]);
@@ -162,8 +159,8 @@ describe("getAllNotes", () => {
       list.push(note);
       byFolder.set(note.folder, list);
     }
-    vi.mocked(runJxaWithKill).mockReset();
-    vi.mocked(runJxaWithKill).mockImplementation(async (...args: Parameters<typeof runJxaWithKill>) => {
+    vi.mocked(executeJxa).mockReset();
+    vi.mocked(executeJxa).mockImplementation(async (...args: Parameters<typeof executeJxa>) => {
       const src = String(args[0]);
       if (src.includes("folders.name()")) {
         // Corrupt enumerate: legacy shape without per-folder counts.
@@ -191,56 +188,82 @@ describe("getAllNotes", () => {
     expect(notes[1].folder).toBe("Personal");
     // The fallback path really ran: per-folder count calls (`.notes.length`
     // outside the enumeration call) are present.
-    const countCalls = vi.mocked(runJxaWithKill).mock.calls.filter(
+    const countCalls = vi.mocked(executeJxa).mock.calls.filter(
       ([code]) => String(code).includes(".notes.length") && !String(code).includes("folders.name()")
     );
     expect(countCalls.length).toBeGreaterThan(0);
   });
 });
 
+/** Raw note payload as the by-id JXA returns it. */
+function rawNote(overrides: Partial<FolderedNote> = {}): FolderedNote {
+  return {
+    id: "x-coredata://123",
+    title: "My Note",
+    folder: "Work",
+    created: "2024-01-01T00:00:00Z",
+    modified: "2024-01-02T00:00:00Z",
+    htmlContent: "<p>Hello World</p>",
+    ...overrides,
+  };
+}
+
 describe("getNoteByTitle", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.mocked(executeJxa).mockReset();
   });
 
   it("should return null when note not found", async () => {
-    vi.mocked(runJxaWithKill).mockResolvedValueOnce("[]");
+    vi.mocked(executeJxa).mockResolvedValueOnce(JSON.stringify([[]]));
 
     const note = await getNoteByTitle("Missing Note");
     expect(note).toBeNull();
   });
 
-  it("should return note with content", async () => {
-    const mockNotes = [{
-      id: "123",
-      title: "My Note",
-      folder: "Work",
-      created: "2024-01-01T00:00:00Z",
-      modified: "2024-01-02T00:00:00Z",
-      htmlContent: "<p>Hello World</p>",
-    }];
-    vi.mocked(runJxaWithKill).mockResolvedValueOnce(JSON.stringify(mockNotes));
+  it("should resolve the title, then read the note by id", async () => {
+    vi.mocked(executeJxa)
+      .mockResolvedValueOnce(JSON.stringify([[{ id: "x-coredata://123", title: "My Note", folder: "Work", created: "" }]]))
+      .mockResolvedValueOnce(JSON.stringify(rawNote()));
 
     const note = await getNoteByTitle("My Note");
-    expect(note).not.toBeNull();
-    expect(note?.title).toBe("My Note");
+    expect(note?.id).toBe("x-coredata://123");
+    expect(note?.folder).toBe("Work");
     expect(note?.content).toContain("Hello World");
+    expect(String(vi.mocked(executeJxa).mock.calls[1][0])).toContain('"x-coredata://123"');
   });
 
-  it("should handle folder/title format", async () => {
-    const mockNotes = [{
-      id: "123",
-      title: "Note",
-      folder: "Work",
-      created: "2024-01-01T00:00:00Z",
-      modified: "2024-01-02T00:00:00Z",
-      htmlContent: "<p>Content</p>",
-    }];
-    vi.mocked(runJxaWithKill).mockResolvedValueOnce(JSON.stringify(mockNotes));
+  it("should throw DuplicateNoteError instead of returning the first match", async () => {
+    vi.mocked(executeJxa).mockResolvedValueOnce(
+      JSON.stringify([[
+        { id: "a", title: "Note", folder: "Work", created: "2026-01-09T10:00:00.000Z" },
+        { id: "b", title: "Note", folder: "Personal", created: "2026-01-09T11:00:00.000Z" },
+      ]])
+    );
 
-    const note = await getNoteByTitle("Work/Note");
-    expect(note).not.toBeNull();
-    expect(note?.folder).toBe("Work");
+    const error = await getNoteByTitle("Note").catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(DuplicateNoteError);
+    expect((error as DuplicateNoteError).suggestions.map((s) => s.id)).toEqual(["a", "b"]);
+    expect(executeJxa).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("buildLookupCandidates", () => {
+  it("tries the whole input as a title first, then every split from the right", () => {
+    expect(buildLookupCandidates("Work/2024/05/12 Standup")).toEqual([
+      { title: "Work/2024/05/12 Standup", folder: null },
+      { title: "12 Standup", folder: "Work/2024/05" },
+      { title: "05/12 Standup", folder: "Work/2024" },
+      { title: "2024/05/12 Standup", folder: "Work" },
+    ]);
+  });
+
+  it("skips splits with an empty folder or title", () => {
+    expect(buildLookupCandidates("/Note")).toEqual([{ title: "/Note", folder: null }]);
+    expect(buildLookupCandidates("Folder/")).toEqual([{ title: "Folder/", folder: null }]);
+  });
+
+  it("returns only the title candidate when there is no slash", () => {
+    expect(buildLookupCandidates("Plain")).toEqual([{ title: "Plain", folder: null }]);
   });
 });
 
@@ -254,23 +277,58 @@ describe("getAllFolders", () => {
     // New enumerate shape with usable counts: no re-enumerate retry, so one
     // persistent mock covers the call (a legacy `{ names, count }` Once-mock
     // would retry into a stale implementation from another test).
-    vi.mocked(runJxaWithKill).mockReset();
-    vi.mocked(runJxaWithKill).mockResolvedValue(
+    vi.mocked(executeJxa).mockReset();
+    vi.mocked(executeJxa).mockResolvedValue(
       JSON.stringify({ names: mockFolders, counts: mockFolders.map(() => 0) })
     );
 
     const folders = await getAllFolders();
     expect(folders).toEqual(["Work", "Personal", "Archive"]);
   });
+
+  it("should hide every account's Recently Deleted folder", async () => {
+    const mockFolders = ["Work", "Recently Deleted", "Notes", "recently deleted"];
+    vi.mocked(executeJxa).mockReset();
+    vi.mocked(executeJxa).mockResolvedValue(
+      JSON.stringify({ names: mockFolders, counts: mockFolders.map(() => 0) })
+    );
+
+    await expect(getAllFolders()).resolves.toEqual(["Work", "Notes"]);
+  });
+});
+
+describe("Recently Deleted exclusion", () => {
+  const library: FolderedNote[] = [
+    { id: "w", title: "Live", folder: "Work", created: "2024-01-01T00:00:00Z", modified: "2024-01-02T00:00:00Z" },
+    { id: "t", title: "Trashed", folder: "Recently Deleted", created: "2024-01-01T00:00:00Z", modified: "2024-01-03T00:00:00Z" },
+    { id: "p", title: "Personal", folder: "Personal", created: "2024-01-01T00:00:00Z", modified: "2024-01-04T00:00:00Z" },
+  ];
+
+  it("getAllNotes never fetches the trash folder and keeps later indices intact", async () => {
+    mockFolderedNotes(library);
+
+    const notes = await getAllNotes();
+    expect(notes.map((n) => n.id)).toEqual(["w", "p"]);
+    const fetched = vi.mocked(executeJxa).mock.calls.map(([code]) => String(code));
+    expect(fetched.some((code) => code.includes('"Recently Deleted"'))).toBe(false);
+    // "Personal" sits after the trash folder: still addressed by its real index.
+    expect(fetched.some((code) => code.includes("const folderIndex = 2;"))).toBe(true);
+  });
+
+  it("list-notes cannot list the trash folder by name", async () => {
+    mockFolderedNotes(library);
+
+    await expect(listNotes({ folder: "recently deleted" })).resolves.toEqual([]);
+  });
 });
 
 describe("resolveNoteTitle", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.mocked(executeJxa).mockReset();
   });
 
   it("should return error when no notes found", async () => {
-    vi.mocked(runJxa).mockResolvedValueOnce("[]");
+    vi.mocked(executeJxa).mockResolvedValueOnce(JSON.stringify([[]]));
 
     const result = await resolveNoteTitle("Missing");
     expect(result.success).toBe(false);
@@ -278,20 +336,22 @@ describe("resolveNoteTitle", () => {
   });
 
   it("should return note when exactly one match", async () => {
-    const mockNotes = [{ id: "123", title: "My Note", folder: "Work" }];
-    vi.mocked(runJxa).mockResolvedValueOnce(JSON.stringify(mockNotes));
+    vi.mocked(executeJxa).mockResolvedValueOnce(
+      JSON.stringify([[{ id: "123", title: "My Note", folder: "Work", created: "" }]])
+    );
 
     const result = await resolveNoteTitle("My Note");
     expect(result.success).toBe(true);
-    expect(result.note?.id).toBe("123");
+    expect(result.note).toEqual({ id: "123", title: "My Note", folder: "Work" });
   });
 
   it("should return suggestions when multiple matches", async () => {
-    const mockNotes = [
-      { id: "123", title: "Note", folder: "Work", created: "2026-01-09T10:00:00.000Z" },
-      { id: "456", title: "Note", folder: "Personal", created: "2026-01-09T11:00:00.000Z" },
-    ];
-    vi.mocked(runJxa).mockResolvedValueOnce(JSON.stringify(mockNotes));
+    vi.mocked(executeJxa).mockResolvedValueOnce(
+      JSON.stringify([[
+        { id: "123", title: "Note", folder: "Work", created: "2026-01-09T10:00:00.000Z" },
+        { id: "456", title: "Note", folder: "Personal", created: "2026-01-09T11:00:00.000Z" },
+      ]])
+    );
 
     const result = await resolveNoteTitle("Note");
     expect(result.success).toBe(false);
@@ -301,27 +361,58 @@ describe("resolveNoteTitle", () => {
     expect(result.suggestions?.[1].id).toBe("456");
   });
 
-  it("should resolve note by ID prefix", async () => {
-    const mockNote = {
-      id: "x-coredata://123",
-      title: "ID Note",
-      folder: "Work",
-      created: "2026-01-09T10:00:00.000Z",
-      modified: "2026-01-09T11:00:00.000Z",
-      htmlContent: "<p>Content</p>",
-    };
-    // The id: branch delegates to getNoteById in read.ts, which runs
-    // through the killable runner rather than run-jxa.
-    vi.mocked(runJxaWithKill).mockResolvedValueOnce(JSON.stringify(mockNote));
+  it("should resolve a title containing '/' as a whole title first", async () => {
+    vi.mocked(executeJxa).mockResolvedValueOnce(
+      JSON.stringify([[{ id: "q", title: "Q1/Q2 plan", folder: "Work", created: "" }]])
+    );
+
+    const result = await resolveNoteTitle("Q1/Q2 plan");
+    expect(result.note?.id).toBe("q");
+    // All interpretations travel in one script, whole title first.
+    const code = String(vi.mocked(executeJxa).mock.calls[0][0]);
+    expect(code).toContain(JSON.stringify(buildLookupCandidates("Q1/Q2 plan")));
+    expect(executeJxa).toHaveBeenCalledTimes(1);
+  });
+
+  it("should fall back to a folder/title split when the whole title matches nothing", async () => {
+    // The script stops at the first candidate with hits: whole title empty,
+    // then folder "Work" + title "Note" matched.
+    vi.mocked(executeJxa).mockResolvedValueOnce(
+      JSON.stringify([[], [{ id: "w", title: "Note", folder: "Work", created: "" }]])
+    );
+
+    const result = await resolveNoteTitle("Work/Note");
+    expect(result.note).toEqual({ id: "w", title: "Note", folder: "Work" });
+  });
+
+  it("should name the split title in the ambiguity error", async () => {
+    vi.mocked(executeJxa).mockResolvedValueOnce(
+      JSON.stringify([[], [
+        { id: "1", title: "Note", folder: "Work", created: "" },
+        { id: "2", title: "Note", folder: "Work", created: "" },
+      ]])
+    );
+
+    const result = await resolveNoteTitle("Work/Note");
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('"Note"');
+    expect(result.suggestions).toHaveLength(2);
+  });
+
+  it("should resolve note by ID prefix without reading the body", async () => {
+    vi.mocked(executeJxa).mockResolvedValueOnce(
+      JSON.stringify({ id: "x-coredata://123", title: "ID Note", folder: "Work" })
+    );
 
     const result = await resolveNoteTitle("id:x-coredata://123");
-    expect(result.success).toBe(true);
-    expect(result.note?.id).toBe("x-coredata://123");
+    expect(result.note).toEqual({ id: "x-coredata://123", title: "ID Note", folder: "Work" });
+    const code = String(vi.mocked(executeJxa).mock.calls[0][0]);
+    expect(code).toContain("byId");
+    expect(code).not.toContain("body()");
   });
 
   it("should return error for invalid ID", async () => {
-    // Same delegation as above: the ID lookup runs through read.ts.
-    vi.mocked(runJxaWithKill).mockResolvedValueOnce("null");
+    vi.mocked(executeJxa).mockResolvedValueOnce("null");
 
     const result = await resolveNoteTitle("id:invalid-id");
     expect(result.success).toBe(false);
@@ -329,29 +420,26 @@ describe("resolveNoteTitle", () => {
   });
 });
 
-describe("getNoteByTitle with ID prefix", () => {
+describe("getNoteById", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.mocked(executeJxa).mockReset();
   });
 
-  it("should route id: prefix to ID lookup", async () => {
-    const mockNote = {
-      id: "x-coredata://abc",
-      title: "My Note",
-      folder: "Work",
-      created: "2026-01-09T10:00:00.000Z",
-      modified: "2026-01-09T11:00:00.000Z",
-      htmlContent: "<p>Hello</p>",
-    };
-    vi.mocked(runJxaWithKill).mockResolvedValueOnce(JSON.stringify(mockNote));
+  it("should route id: prefix to a direct byId lookup without scanning folders", async () => {
+    vi.mocked(executeJxa).mockResolvedValueOnce(JSON.stringify(rawNote({ id: "x-coredata://abc", folder: "Nested" })));
 
     const note = await getNoteByTitle("id:x-coredata://abc");
-    expect(note).not.toBeNull();
     expect(note?.id).toBe("x-coredata://abc");
+    expect(note?.folder).toBe("Nested");
+    const code = String(vi.mocked(executeJxa).mock.calls[0][0]);
+    expect(code).toContain("app.notes.byId");
+    expect(code).toContain("container()");
+    expect(code).not.toContain("app.folders()");
+    expect(code).not.toContain("properties()");
   });
 
   it("should return null for non-existent ID", async () => {
-    vi.mocked(runJxaWithKill).mockResolvedValueOnce("null");
+    vi.mocked(executeJxa).mockResolvedValueOnce("null");
 
     const note = await getNoteByTitle("id:nonexistent");
     expect(note).toBeNull();
@@ -450,8 +538,8 @@ describe("listNotes", () => {
   it("should return empty array when folder has no notes", async () => {
     // New enumerate shape with usable counts: no re-enumerate retry, and the
     // persistent mock cannot leak a stale implementation from another test.
-    vi.mocked(runJxaWithKill).mockReset();
-    vi.mocked(runJxaWithKill).mockResolvedValue(JSON.stringify({ names: [], counts: [] }));
+    vi.mocked(executeJxa).mockReset();
+    vi.mocked(executeJxa).mockResolvedValue(JSON.stringify({ names: [], counts: [] }));
 
     const notes = await listNotes({ folder: "NonExistent" });
     expect(notes).toHaveLength(0);
@@ -460,8 +548,8 @@ describe("listNotes", () => {
   it("should handle empty notes array", async () => {
     // New enumerate shape with usable counts: no re-enumerate retry, and the
     // persistent mock cannot leak a stale implementation from another test.
-    vi.mocked(runJxaWithKill).mockReset();
-    vi.mocked(runJxaWithKill).mockResolvedValue(JSON.stringify({ names: [], counts: [] }));
+    vi.mocked(executeJxa).mockReset();
+    vi.mocked(executeJxa).mockResolvedValue(JSON.stringify({ names: [], counts: [] }));
 
     const notes = await listNotes();
     expect(notes).toHaveLength(0);
@@ -566,27 +654,27 @@ describe("getNoteMetadataByFolder", () => {
   it("should return empty array when folder has no notes", async () => {
     // New enumerate shape with usable counts: no re-enumerate retry, and the
     // persistent mock cannot leak a stale implementation from another test.
-    vi.mocked(runJxaWithKill).mockReset();
-    vi.mocked(runJxaWithKill).mockResolvedValue(JSON.stringify({ names: [], counts: [] }));
+    vi.mocked(executeJxa).mockReset();
+    vi.mocked(executeJxa).mockResolvedValue(JSON.stringify({ names: [], counts: [] }));
 
     const notes = await getNoteMetadataByFolder("Empty");
     expect(notes).toHaveLength(0);
   });
 
-  it("should return metadata without content fields", async () => {
+  it("should return metadata with id but without content fields", async () => {
     const folderNotes = [
-      { title: "Note", folder: "Work", created: "2024-01-01T00:00:00Z", modified: "2024-01-02T00:00:00Z" },
+      { id: "n-1", title: "Note", folder: "Work", created: "2024-01-01T00:00:00Z", modified: "2024-01-02T00:00:00Z" },
     ];
     mockFolderedNotes(folderNotes);
 
     const notes = await getNoteMetadataByFolder("Work");
-    expect(notes[0]).toHaveProperty("title");
-    expect(notes[0]).toHaveProperty("folder");
-    expect(notes[0]).toHaveProperty("created");
-    expect(notes[0]).toHaveProperty("modified");
-    expect(notes[0]).not.toHaveProperty("content");
-    expect(notes[0]).not.toHaveProperty("htmlContent");
-    expect(notes[0]).not.toHaveProperty("id");
+    expect(notes[0]).toEqual({
+      id: "n-1",
+      title: "Note",
+      folder: "Work",
+      created: "2024-01-01T00:00:00Z",
+      modified: "2024-01-02T00:00:00Z",
+    });
   });
 
   it("should aggregate notes from duplicate folder names", async () => {
@@ -600,7 +688,7 @@ describe("getNoteMetadataByFolder", () => {
     expect(notes).toHaveLength(2);
     expect(notes.map((n) => n.title)).toEqual(["A1", "A2"]);
 
-    const jxaCode = vi.mocked(runJxaWithKill).mock.calls[0][0] as string;
+    const jxaCode = vi.mocked(executeJxa).mock.calls[0][0] as string;
     expect(jxaCode).not.toContain("break;");
   });
 });
@@ -619,7 +707,7 @@ describe("listNotes folder optimization", () => {
     const notes = await listNotes({ folder: "xx" });
     expect(notes).toHaveLength(1);
     expect(notes[0].title).toBe("Note 1");
-    const calls = vi.mocked(runJxaWithKill).mock.calls;
+    const calls = vi.mocked(executeJxa).mock.calls;
     // Batching needs an enumerate call (carrying per-folder counts, so no
     // separate count call) plus one batch call.
     expect(calls.length).toBeGreaterThanOrEqual(2);
@@ -657,7 +745,7 @@ describe("listNotes folder optimization", () => {
     // Unfiltered path first enumerates folders (no `expectedName`), then
     // fetches each folder with scoped batch calls (counts ride along from
     // the enumeration, so no separate count calls).
-    const calls = vi.mocked(runJxaWithKill).mock.calls;
+    const calls = vi.mocked(executeJxa).mock.calls;
     expect(calls.length).toBeGreaterThan(1);
     expect(String(calls[0][0])).not.toContain("expectedName");
     expect(calls.slice(1).every(([code]) => String(code).includes("expectedName"))).toBe(true);
@@ -690,7 +778,7 @@ describe("listNotes folder optimization", () => {
     // The match must come from case-folding JXA, not from a loose mock:
     // the mock only resolves case-insensitively when the generated code
     // folds case.
-    expect(vi.mocked(runJxaWithKill).mock.calls.some(([code]) => String(code).includes("toLowerCase"))).toBe(true);
+    expect(vi.mocked(executeJxa).mock.calls.some(([code]) => String(code).includes("toLowerCase"))).toBe(true);
   });
 
   it("should keep content fetches exact-match", async () => {
@@ -700,8 +788,103 @@ describe("listNotes folder optimization", () => {
     mockFolderedNotes(workNotes);
 
     // The content path was always strict: only the metadata path folds case.
-    const notes = await getNotesInFolder("work");
+    const { notes } = await fetchFolderBatched("work");
     expect(notes).toHaveLength(0);
-    expect(vi.mocked(runJxaWithKill).mock.calls.every(([code]) => !String(code).includes("toLowerCase"))).toBe(true);
+    expect(vi.mocked(executeJxa).mock.calls.every(([code]) => !String(code).includes("toLowerCase"))).toBe(true);
+  });
+});
+
+describe("listNotes folder references", () => {
+  /** Library layout: flat `app.folders()` order, as Notes reports it. */
+  const folders = [
+    { name: "Notes", account: "On My Mac", path: "Notes" },
+    { name: "Notes", account: "iCloud", path: "Notes" },
+    { name: "Projects", account: "iCloud", path: "Projects" },
+    { name: "Child", account: "iCloud", path: "Projects/Child" },
+    { name: "Child", account: "iCloud", path: "Archive/Child" },
+    { name: "Recently Deleted", account: "iCloud", path: "Recently Deleted" },
+  ];
+
+  /**
+   * Mirror Notes for the folder-reference protocol: enumeration returns
+   * names + counts; the reference-match script is answered with the
+   * folderMatches semantics (leaf, nested path, Account/path, trash
+   * excluded) and only when the generated code actually calls the shared
+   * helper; batch calls return one note per folder, titled by its index.
+   */
+  function mockLibrary() {
+    vi.mocked(executeJxa).mockReset();
+    vi.mocked(executeJxa).mockImplementation(async (...args: Parameters<typeof executeJxa>) => {
+      const src = String(args[0]);
+      if (src.includes("folders.name()")) {
+        return JSON.stringify({ names: folders.map((f) => f.name), counts: folders.map(() => 1) });
+      }
+      const refMatch = src.match(/const folderRef = ("(?:[^"\\]|\\.)*");/);
+      if (refMatch) {
+        if (!src.includes("folderMatches(") || !src.includes("isTrashFolder(")) {
+          throw new Error("reference match must reuse FOLDER_JXA_HELPERS");
+        }
+        const ref = JSON.parse(refMatch[1]) as string;
+        const hits = folders
+          .map((f, index) => ({ f, index }))
+          .filter(({ f }) => f.name !== "Recently Deleted")
+          .filter(({ f }) => f.name === ref || f.path === ref || `${f.account}/${f.path}` === ref)
+          .map(({ f, index }) => ({ index, name: f.name }));
+        return JSON.stringify(hits);
+      }
+      if (src.includes(".slice(")) {
+        const index = parseFolderIndex(src);
+        const expected = parseExpectedName(src);
+        if (folders[index]?.name.toLowerCase() !== expected.toLowerCase()) {
+          throw new Error(`[FOLDER_MISMATCH] index ${index}`);
+        }
+        return JSON.stringify([
+          { id: `n-${index}`, title: `In ${index}`, folder: folders[index].name, created: "", modified: "" },
+        ]);
+      }
+      throw new Error(`mockLibrary: unexpected JXA call: ${src.slice(0, 160)}`);
+    });
+  }
+
+  function fetchedIndices(): number[] {
+    return vi
+      .mocked(executeJxa)
+      .mock.calls.map(([code]) => String(code))
+      .filter((code) => code.includes(".slice("))
+      .map(parseFolderIndex);
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("selects only the account's folder for Account/Folder", async () => {
+    mockLibrary();
+    const notes = await listNotes({ folder: "iCloud/Notes" });
+    expect(notes.map((n) => n.id)).toEqual(["n-1"]);
+    expect(fetchedIndices()).toEqual([1]);
+  });
+
+  it("selects only the nested folder for Parent/Child", async () => {
+    mockLibrary();
+    const notes = await listNotes({ folder: "Projects/Child" });
+    expect(notes.map((n) => n.id)).toEqual(["n-3"]);
+    expect(fetchedIndices()).toEqual([3]);
+  });
+
+  it("aggregates every same-named folder for a leaf name, case-insensitively", async () => {
+    mockLibrary();
+    const notes = await listNotes({ folder: "child", sort_by: "title", order: "asc" });
+    expect(notes.map((n) => n.id)).toEqual(["n-3", "n-4"]);
+    expect(fetchedIndices()).toEqual([3, 4]);
+    // Leaf names resolve from the enumeration alone.
+    expect(vi.mocked(executeJxa).mock.calls.some(([code]) => String(code).includes("const folderRef"))).toBe(false);
+  });
+
+  it("never selects the trash folder", async () => {
+    mockLibrary();
+    expect(await listNotes({ folder: "iCloud/Recently Deleted" })).toEqual([]);
+    expect(await listNotes({ folder: "recently deleted" })).toEqual([]);
+    expect(fetchedIndices()).toEqual([]);
   });
 });

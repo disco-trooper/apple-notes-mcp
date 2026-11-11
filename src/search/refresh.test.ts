@@ -1,132 +1,44 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-
-vi.mock("../notes/read.js", () => ({
-  getAllNotes: vi.fn(),
-  getNoteByFolderAndTitle: vi.fn(),
-}));
+import type { IndexResult } from "./indexer.js";
 
 vi.mock("../db/lancedb.js", () => ({
   getVectorStore: vi.fn(),
-  getChunkStore: vi.fn(),
 }));
 
 vi.mock("./indexer.js", () => ({
-  incrementalIndex: vi.fn(),
+  indexNotes: vi.fn(),
+  getLastIndexCompletedAtMs: vi.fn(() => null),
 }));
 
-vi.mock("./chunk-indexer.js", () => ({
-  hasChunkIndex: vi.fn().mockResolvedValue(false),
-  updateChunksForNotes: vi.fn(),
-}));
+const STALE = [{ id: "1", title: "Note 1", folder: "Work", modified: "2020-01-01T00:00:00Z", indexed_at: "2020-01-01T00:00:00Z" }];
 
-describe("checkForChanges", () => {
-  beforeEach(() => {
-    vi.resetModules();
-    vi.clearAllMocks();
-  });
+function changed(indexed: number, deleted = 0): IndexResult {
+  return {
+    total: 1,
+    indexed,
+    timeMs: 1,
+    breakdown: { added: 0, updated: indexed, deleted, skipped: 0 },
+  };
+}
 
-  afterEach(() => {
-    delete process.env.INDEX_TTL;
-    delete process.env.SEARCH_REFRESH_TIMEOUT_MS;
-  });
-
-  it("returns true if notes were modified after indexing", async () => {
-    const { getAllNotes } = await import("../notes/read.js");
-    const { getVectorStore } = await import("../db/lancedb.js");
-
-    vi.mocked(getAllNotes).mockResolvedValue([
-      { title: "Note 1", folder: "Work", created: "2026-01-01", modified: "2026-01-10T12:00:00Z" },
-    ]);
-
-    vi.mocked(getVectorStore).mockReturnValue({
-      getIndexMetadata: vi.fn().mockResolvedValue([
-        { id: "1", title: "Note 1", folder: "Work", indexed_at: "2026-01-09T12:00:00Z" },
-      ]),
-    } as any);
-
-    const { checkForChanges } = await import("./refresh.js");
-    const hasChanges = await checkForChanges();
-
-    expect(hasChanges).toBe(true);
-  });
-
-  it("returns false if no changes", async () => {
-    const { getAllNotes } = await import("../notes/read.js");
-    const { getVectorStore } = await import("../db/lancedb.js");
-
-    vi.mocked(getAllNotes).mockResolvedValue([
-      { title: "Note 1", folder: "Work", created: "2026-01-01", modified: "2026-01-08T12:00:00Z" },
-    ]);
-
-    vi.mocked(getVectorStore).mockReturnValue({
-      getIndexMetadata: vi.fn().mockResolvedValue([
-        { id: "1", title: "Note 1", folder: "Work", indexed_at: "2026-01-09T12:00:00Z" },
-      ]),
-    } as any);
-
-    const { checkForChanges } = await import("./refresh.js");
-    const hasChanges = await checkForChanges();
-
-    expect(hasChanges).toBe(false);
-  });
-
-  it("returns true if a new note was added", async () => {
-    const { getAllNotes } = await import("../notes/read.js");
-    const { getVectorStore } = await import("../db/lancedb.js");
-
-    vi.mocked(getAllNotes).mockResolvedValue([
-      { title: "Note 1", folder: "Work", created: "2026-01-01", modified: "2026-01-08T12:00:00Z" },
-      { title: "New Note", folder: "Work", created: "2026-01-10", modified: "2026-01-10T12:00:00Z" },
-    ]);
-
-    vi.mocked(getVectorStore).mockReturnValue({
-      getIndexMetadata: vi.fn().mockResolvedValue([
-        { id: "1", title: "Note 1", folder: "Work", indexed_at: "2026-01-09T12:00:00Z" },
-      ]),
-    } as any);
-
-    const { checkForChanges } = await import("./refresh.js");
-    const hasChanges = await checkForChanges();
-
-    expect(hasChanges).toBe(true);
-  });
-
-  it("returns true if a note was deleted", async () => {
-    const { getAllNotes } = await import("../notes/read.js");
-    const { getVectorStore } = await import("../db/lancedb.js");
-
-    vi.mocked(getAllNotes).mockResolvedValue([]);
-
-    vi.mocked(getVectorStore).mockReturnValue({
-      getIndexMetadata: vi.fn().mockResolvedValue([
-        { id: "1", title: "Note 1", folder: "Work", indexed_at: "2026-01-09T12:00:00Z" },
-      ]),
-    } as any);
-
-    const { checkForChanges } = await import("./refresh.js");
-    const hasChanges = await checkForChanges();
-
-    expect(hasChanges).toBe(true);
-  });
-
-  it("returns true if no index exists and notes exist", async () => {
-    const { getAllNotes } = await import("../notes/read.js");
-    const { getVectorStore } = await import("../db/lancedb.js");
-
-    vi.mocked(getAllNotes).mockResolvedValue([
-      { title: "Note 1", folder: "Work", created: "2026-01-01", modified: "2026-01-08T12:00:00Z" },
-    ]);
-
-    vi.mocked(getVectorStore).mockReturnValue({
-      getIndexMetadata: vi.fn().mockRejectedValue(new Error("Table not found")),
-    } as any);
-
-    const { checkForChanges } = await import("./refresh.js");
-    const hasChanges = await checkForChanges();
-
-    expect(hasChanges).toBe(true);
-  });
-});
+/** refresh.ts and lock.ts keep module state; import fresh copies after vi.resetModules(). */
+async function setup(metadata: unknown[] | Error = STALE) {
+  const { getVectorStore } = await import("../db/lancedb.js");
+  const getIndexMetadata =
+    metadata instanceof Error ? vi.fn().mockRejectedValue(metadata) : vi.fn().mockResolvedValue(metadata);
+  vi.mocked(getVectorStore).mockReturnValue({ getIndexMetadata } as never);
+  const { indexNotes, getLastIndexCompletedAtMs } = await import("./indexer.js");
+  vi.mocked(getLastIndexCompletedAtMs).mockReturnValue(null);
+  const lock = await import("../indexing/lock.js");
+  const { refreshIfNeeded } = await import("./refresh.js");
+  return {
+    getIndexMetadata,
+    indexNotes: vi.mocked(indexNotes),
+    lastIndexCompletedAtMs: vi.mocked(getLastIndexCompletedAtMs),
+    lock,
+    refreshIfNeeded,
+  };
+}
 
 describe("refreshIfNeeded", () => {
   beforeEach(() => {
@@ -140,155 +52,148 @@ describe("refreshIfNeeded", () => {
     vi.useRealTimers();
   });
 
-  it("skips refresh when INDEX_TTL is not configured", async () => {
-    const { incrementalIndex } = await import("./indexer.js");
-    const { getVectorStore } = await import("../db/lancedb.js");
+  it("does nothing when INDEX_TTL is not configured", async () => {
+    const { getIndexMetadata, indexNotes, refreshIfNeeded } = await setup();
 
-    const { refreshIfNeeded } = await import("./refresh.js");
-    const refreshed = await refreshIfNeeded();
-
-    expect(refreshed).toBe(false);
-    expect(incrementalIndex).not.toHaveBeenCalled();
-    expect(getVectorStore).not.toHaveBeenCalled();
+    expect(await refreshIfNeeded()).toBe(false);
+    expect(indexNotes).not.toHaveBeenCalled();
+    expect(getIndexMetadata).not.toHaveBeenCalled();
   });
 
-  it("triggers incremental index when TTL expired and changes detected", async () => {
+  it("runs an incremental index when the TTL has expired", async () => {
     process.env.INDEX_TTL = "1";
+    const { indexNotes, refreshIfNeeded } = await setup();
+    indexNotes.mockResolvedValue(changed(0, 1));
 
-    const { incrementalIndex } = await import("./indexer.js");
-    const { getAllNotes } = await import("../notes/read.js");
-    const { getVectorStore } = await import("../db/lancedb.js");
-
-    vi.mocked(getAllNotes).mockResolvedValue([
-      { title: "Note 1", folder: "Work", created: "2026-01-01", modified: "2026-01-10T12:00:00Z" },
-    ]);
-
-    vi.mocked(getVectorStore).mockReturnValue({
-      getIndexMetadata: vi.fn().mockResolvedValue([
-        { id: "1", title: "Note 1", folder: "Work", indexed_at: "2020-01-01T00:00:00Z" },
-      ]),
-    } as any);
-
-    vi.mocked(incrementalIndex).mockResolvedValue({
-      total: 1,
-      indexed: 1,
-      errors: 0,
-      timeMs: 100,
-    });
-
-    const { refreshIfNeeded } = await import("./refresh.js");
-    const refreshed = await refreshIfNeeded();
-
-    expect(refreshed).toBe(true);
-    expect(incrementalIndex).toHaveBeenCalledOnce();
+    expect(await refreshIfNeeded()).toBe(true);
+    expect(indexNotes).toHaveBeenCalledExactlyOnceWith("incremental");
   });
 
-  it("skips refresh when TTL is not expired", async () => {
+  it("reports false when the incremental run changed nothing", async () => {
+    process.env.INDEX_TTL = "1";
+    const { indexNotes, refreshIfNeeded } = await setup();
+    indexNotes.mockResolvedValue(changed(0));
+
+    expect(await refreshIfNeeded()).toBe(false);
+  });
+
+  it("skips when the TTL has not expired", async () => {
     process.env.INDEX_TTL = "86400";
+    const fresh = [{ ...STALE[0], indexed_at: new Date().toISOString() }];
+    const { indexNotes, refreshIfNeeded } = await setup(fresh);
 
-    const { incrementalIndex } = await import("./indexer.js");
-    const { getVectorStore } = await import("../db/lancedb.js");
-
-    vi.mocked(getVectorStore).mockReturnValue({
-      getIndexMetadata: vi.fn().mockResolvedValue([
-        {
-          id: "1",
-          title: "Note 1",
-          folder: "Work",
-          indexed_at: new Date().toISOString(),
-        },
-      ]),
-    } as any);
-
-    const { refreshIfNeeded } = await import("./refresh.js");
-    const refreshed = await refreshIfNeeded();
-
-    expect(refreshed).toBe(false);
-    expect(incrementalIndex).not.toHaveBeenCalled();
+    expect(await refreshIfNeeded()).toBe(false);
+    expect(indexNotes).not.toHaveBeenCalled();
   });
 
-  it("returns false when refresh throws", async () => {
+  it("does not build an index when the notes table is missing", async () => {
     process.env.INDEX_TTL = "1";
+    const { indexNotes, refreshIfNeeded } = await setup(new Error("Table 'notes' was not found"));
 
-    const { incrementalIndex } = await import("./indexer.js");
-    const { getAllNotes } = await import("../notes/read.js");
-    const { getVectorStore } = await import("../db/lancedb.js");
-
-    vi.mocked(getAllNotes).mockRejectedValue(new Error("JXA failed"));
-
-    vi.mocked(getVectorStore).mockReturnValue({
-      getIndexMetadata: vi.fn().mockResolvedValue([
-        { id: "1", title: "Note 1", folder: "Work", indexed_at: "2020-01-01T00:00:00Z" },
-      ]),
-    } as any);
-
-    const { refreshIfNeeded } = await import("./refresh.js");
-    const refreshed = await refreshIfNeeded();
-
-    expect(refreshed).toBe(false);
-    expect(incrementalIndex).not.toHaveBeenCalled();
+    expect(await refreshIfNeeded()).toBe(false);
+    expect(indexNotes).not.toHaveBeenCalled();
   });
 
-  it("returns false when refresh exceeds timeout budget", async () => {
-    vi.useFakeTimers();
+  it("does not build an index when the notes table has no rows", async () => {
+    process.env.INDEX_TTL = "1";
+    const { indexNotes, refreshIfNeeded } = await setup([]);
 
+    expect(await refreshIfNeeded()).toBe(false);
+    expect(indexNotes).not.toHaveBeenCalled();
+  });
+
+  it("treats a recent index run that changed nothing as fresh", async () => {
+    process.env.INDEX_TTL = "3600";
+    const { getIndexMetadata, indexNotes, lastIndexCompletedAtMs, refreshIfNeeded } = await setup();
+    // Stored rows are old (indexed_at untouched), but a no-op run just finished.
+    lastIndexCompletedAtMs.mockReturnValue(Date.now() - 1000);
+
+    expect(await refreshIfNeeded()).toBe(false);
+    expect(indexNotes).not.toHaveBeenCalled();
+    expect(getIndexMetadata).not.toHaveBeenCalled();
+  });
+
+  it("refreshes once the last index run is older than the TTL", async () => {
+    process.env.INDEX_TTL = "60";
+    const { indexNotes, lastIndexCompletedAtMs, refreshIfNeeded } = await setup();
+    lastIndexCompletedAtMs.mockReturnValue(Date.now() - 61_000);
+    indexNotes.mockResolvedValue(changed(1));
+
+    expect(await refreshIfNeeded()).toBe(true);
+    expect(indexNotes).toHaveBeenCalledOnce();
+  });
+
+  it("does not rescan the library again within the TTL after a refresh", async () => {
+    process.env.INDEX_TTL = "86400";
+    const { getIndexMetadata, indexNotes, refreshIfNeeded } = await setup();
+    indexNotes.mockResolvedValue(changed(0));
+
+    await refreshIfNeeded();
+    await refreshIfNeeded();
+
+    expect(indexNotes).toHaveBeenCalledTimes(1);
+    expect(getIndexMetadata).toHaveBeenCalledTimes(1);
+  });
+
+  it("skips while another index writer holds the lock", async () => {
+    process.env.INDEX_TTL = "1";
+    const { indexNotes, lock, refreshIfNeeded } = await setup();
+    let release!: () => void;
+    const held = lock.withIndexLock(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        })
+    );
+
+    expect(await refreshIfNeeded()).toBe(false);
+    expect(indexNotes).not.toHaveBeenCalled();
+
+    release();
+    await held;
+  });
+
+  it("returns false when the refresh fails", async () => {
+    process.env.INDEX_TTL = "1";
+    const { indexNotes, refreshIfNeeded } = await setup();
+    indexNotes.mockRejectedValue(new Error("JXA failed"));
+
+    expect(await refreshIfNeeded()).toBe(false);
+  });
+
+  it("returns false on timeout and swallows a later failure", async () => {
+    vi.useFakeTimers();
     process.env.INDEX_TTL = "1";
     process.env.SEARCH_REFRESH_TIMEOUT_MS = "5";
-
-    const { incrementalIndex } = await import("./indexer.js");
-    const { getAllNotes } = await import("../notes/read.js");
-    const { getVectorStore } = await import("../db/lancedb.js");
-
-    vi.mocked(getAllNotes).mockResolvedValue([
-      { title: "Note 1", folder: "Work", created: "2026-01-01", modified: "2026-01-10T12:00:00Z" },
-    ]);
-
-    vi.mocked(getVectorStore).mockReturnValue({
-      getIndexMetadata: vi.fn().mockResolvedValue([
-        { id: "1", title: "Note 1", folder: "Work", indexed_at: "2020-01-01T00:00:00Z" },
-      ]),
-    } as any);
-
-    vi.mocked(incrementalIndex).mockImplementation(
-      () => new Promise(() => {
-        // Intentionally never resolves
+    const { indexNotes, refreshIfNeeded } = await setup();
+    let fail!: (error: Error) => void;
+    indexNotes.mockReturnValue(
+      new Promise<IndexResult>((_resolve, reject) => {
+        fail = reject;
       })
     );
 
-    const { refreshIfNeeded } = await import("./refresh.js");
     const pending = refreshIfNeeded();
-
     await vi.advanceTimersByTimeAsync(10);
     await expect(pending).resolves.toBe(false);
+
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+    fail(new Error("late failure"));
+    await vi.runAllTimersAsync();
+    process.off("unhandledRejection", unhandled);
+    expect(unhandled).not.toHaveBeenCalled();
   });
 
-  it("coalesces concurrent refresh calls into a single run", async () => {
+  it("coalesces concurrent calls into one run", async () => {
     process.env.INDEX_TTL = "1";
+    const { indexNotes, refreshIfNeeded } = await setup();
+    indexNotes.mockResolvedValue(changed(1));
 
-    const { incrementalIndex } = await import("./indexer.js");
-    const { getAllNotes } = await import("../notes/read.js");
-    const { getVectorStore } = await import("../db/lancedb.js");
-
-    vi.mocked(getAllNotes).mockResolvedValue([
-      { title: "Note 1", folder: "Work", created: "2026-01-01", modified: "2026-01-10T12:00:00Z" },
-    ]);
-
-    vi.mocked(getVectorStore).mockReturnValue({
-      getIndexMetadata: vi.fn().mockResolvedValue([
-        { id: "1", title: "Note 1", folder: "Work", indexed_at: "2020-01-01T00:00:00Z" },
-      ]),
-    } as any);
-
-    vi.mocked(incrementalIndex).mockImplementation(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 20));
-      return { total: 1, indexed: 1, errors: 0, timeMs: 100 };
-    });
-
-    const { refreshIfNeeded } = await import("./refresh.js");
     const [first, second] = await Promise.all([refreshIfNeeded(), refreshIfNeeded()]);
 
     expect(first).toBe(true);
     expect(second).toBe(true);
-    expect(incrementalIndex).toHaveBeenCalledTimes(1);
+    expect(indexNotes).toHaveBeenCalledTimes(1);
   });
 });

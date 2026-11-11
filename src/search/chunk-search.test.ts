@@ -1,171 +1,61 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import {
-  rrfScore,
-  deduplicateByNote,
-  filterByFolder,
-  searchChunks,
-  type ChunkSearchResult,
-} from "./chunk-search.js";
+import type { ChunkRow } from "../db/lancedb.js";
 
-// Mock dependencies
 vi.mock("../embeddings/index.js", () => ({
-  getEmbedding: vi.fn().mockResolvedValue([0.1, 0.2, 0.3]),
+  getQueryEmbedding: vi.fn().mockResolvedValue([0.1, 0.2, 0.3]),
+  getProviderDescription: () => "Test (model, 3 dims)",
 }));
 
 vi.mock("../db/lancedb.js", () => ({
   getChunkStore: vi.fn(),
+  assertIndexCompatible: vi.fn(),
 }));
 
+import { deduplicateByNote, searchChunks, type ChunkSearchResult } from "./chunk-search.js";
 import { getChunkStore } from "../db/lancedb.js";
+import { getQueryEmbedding } from "../embeddings/index.js";
 
-describe("rrfScore", () => {
-  it("calculates RRF score correctly", () => {
-    // RRF formula: 1 / (k + rank) where k = 60
-    expect(rrfScore(1)).toBeCloseTo(1 / 61, 5);
-    expect(rrfScore(10)).toBeCloseTo(1 / 70, 5);
-  });
+function row(noteId: string, chunkIndex: number, score: number, folder = "Work"): ChunkRow {
+  return {
+    chunk_id: `${noteId}_chunk_${chunkIndex}`,
+    note_id: noteId,
+    note_title: `Title ${noteId}`,
+    folder,
+    chunk_index: chunkIndex,
+    total_chunks: 2,
+    content: `${noteId} chunk ${chunkIndex}`,
+    modified: "2024-01-01",
+    score,
+  };
+}
 
-  it("returns smaller scores for higher ranks", () => {
-    expect(rrfScore(1)).toBeGreaterThan(rrfScore(10));
-    expect(rrfScore(10)).toBeGreaterThan(rrfScore(100));
-  });
-
-  it("returns correct score for rank 0", () => {
-    expect(rrfScore(0)).toBeCloseTo(1 / 60, 5);
-  });
-});
+function useStore(vectorRows: ChunkRow[], fts: ChunkRow[] | Error = []) {
+  const store = {
+    searchChunks: vi.fn().mockResolvedValue(vectorRows),
+    searchChunksFTS: fts instanceof Error ? vi.fn().mockRejectedValue(fts) : vi.fn().mockResolvedValue(fts),
+  };
+  vi.mocked(getChunkStore).mockReturnValue(store as never);
+  return store;
+}
 
 describe("deduplicateByNote", () => {
-  it("keeps best-scoring chunk per note", () => {
-    const chunks: ChunkSearchResult[] = [
-      {
-        note_id: "note1",
-        note_title: "Note 1",
-        folder: "Work",
-        matchedChunk: "chunk 1",
-        matchedChunkIndex: 0,
-        score: 0.8,
-        modified: "2024-01-01",
-      },
-      {
-        note_id: "note1",
-        note_title: "Note 1",
-        folder: "Work",
-        matchedChunk: "chunk 2",
-        matchedChunkIndex: 1,
-        score: 0.9, // Higher score
-        modified: "2024-01-01",
-      },
-      {
-        note_id: "note2",
-        note_title: "Note 2",
-        folder: "Personal",
-        matchedChunk: "chunk 1",
-        matchedChunkIndex: 0,
-        score: 0.7,
-        modified: "2024-01-02",
-      },
-    ];
-
-    const result = deduplicateByNote(chunks);
-
-    expect(result).toHaveLength(2);
-    // note1 should have the higher scoring chunk (0.9)
-    const note1 = result.find((r) => r.note_id === "note1");
-    expect(note1?.score).toBe(0.9);
-    expect(note1?.matchedChunkIndex).toBe(1);
-  });
-
-  it("sorts by score descending", () => {
-    const chunks: ChunkSearchResult[] = [
-      {
-        note_id: "note1",
-        note_title: "Note 1",
-        folder: "Work",
-        matchedChunk: "chunk 1",
-        matchedChunkIndex: 0,
-        score: 0.5,
-        modified: "2024-01-01",
-      },
-      {
-        note_id: "note2",
-        note_title: "Note 2",
-        folder: "Personal",
-        matchedChunk: "chunk 1",
-        matchedChunkIndex: 0,
-        score: 0.9,
-        modified: "2024-01-02",
-      },
-      {
-        note_id: "note3",
-        note_title: "Note 3",
-        folder: "Work",
-        matchedChunk: "chunk 1",
-        matchedChunkIndex: 0,
-        score: 0.7,
-        modified: "2024-01-03",
-      },
-    ];
-
-    const result = deduplicateByNote(chunks);
-
-    expect(result).toHaveLength(3);
-    expect(result[0].score).toBe(0.9);
-    expect(result[1].score).toBe(0.7);
-    expect(result[2].score).toBe(0.5);
-  });
-
-  it("handles empty array", () => {
-    const result = deduplicateByNote([]);
-    expect(result).toHaveLength(0);
-  });
-});
-
-describe("filterByFolder", () => {
-  const mockChunks: ChunkSearchResult[] = [
-    {
-      note_id: "note1",
-      note_title: "Note 1",
+  it("keeps the best-scoring chunk per note, sorted by score", () => {
+    const result = (score: number, noteId: string, idx: number): ChunkSearchResult => ({
+      note_id: noteId,
+      note_title: noteId,
       folder: "Work",
-      matchedChunk: "content",
-      matchedChunkIndex: 0,
-      score: 1,
-      modified: "2024-01-01",
-    },
-    {
-      note_id: "note2",
-      note_title: "Note 2",
-      folder: "Personal",
-      matchedChunk: "content",
-      matchedChunkIndex: 0,
-      score: 0.9,
-      modified: "2024-01-01",
-    },
-    {
-      note_id: "note3",
-      note_title: "Note 3",
-      folder: "Work/Projects",
-      matchedChunk: "content",
-      matchedChunkIndex: 0,
-      score: 0.8,
-      modified: "2024-01-01",
-    },
-  ];
+      matchedChunk: "",
+      matchedChunkIndex: idx,
+      score,
+      modified: "",
+    });
 
-  it("filters by exact folder name (case insensitive)", () => {
-    const filtered = filterByFolder(mockChunks, "work");
-    expect(filtered).toHaveLength(1);
-    expect(filtered[0].note_title).toBe("Note 1");
-  });
+    const deduped = deduplicateByNote([result(0.8, "a", 0), result(0.9, "a", 1), result(0.95, "b", 0)]);
 
-  it("returns all results when folder is undefined", () => {
-    const filtered = filterByFolder(mockChunks, undefined);
-    expect(filtered).toHaveLength(3);
-  });
-
-  it("returns empty array when no matches", () => {
-    const filtered = filterByFolder(mockChunks, "NonExistent");
-    expect(filtered).toHaveLength(0);
+    expect(deduped.map((r) => [r.note_id, r.matchedChunkIndex])).toEqual([
+      ["b", 0],
+      ["a", 1],
+    ]);
   });
 });
 
@@ -174,154 +64,72 @@ describe("searchChunks", () => {
     vi.clearAllMocks();
   });
 
-  it("handles empty query", async () => {
-    const result = await searchChunks("");
-    expect(result).toHaveLength(0);
+  it("returns nothing for a blank query without touching the store", async () => {
+    expect(await searchChunks("   ")).toEqual([]);
+    expect(getChunkStore).not.toHaveBeenCalled();
   });
 
-  it("handles whitespace-only query", async () => {
-    const result = await searchChunks("   ");
-    expect(result).toHaveLength(0);
+  it("embeds the query with the query role", async () => {
+    useStore([row("a", 0, 1)]);
+
+    await searchChunks("  project ideas ", { mode: "semantic" });
+
+    expect(getQueryEmbedding).toHaveBeenCalledWith("project ideas");
   });
 
-  it("deduplicates results by note", async () => {
-    const mockStore = {
-      searchChunks: vi.fn().mockResolvedValue([
-        {
-          chunk_id: "note1_chunk_0",
-          note_id: "note1",
-          note_title: "Note 1",
-          folder: "Work",
-          chunk_index: 0,
-          total_chunks: 2,
-          content: "first chunk",
-          modified: "2024-01-01",
-          score: 0.8,
-        },
-        {
-          chunk_id: "note1_chunk_1",
-          note_id: "note1",
-          note_title: "Note 1",
-          folder: "Work",
-          chunk_index: 1,
-          total_chunks: 2,
-          content: "second chunk",
-          modified: "2024-01-01",
-          score: 0.9,
-        },
-        {
-          chunk_id: "note2_chunk_0",
-          note_id: "note2",
-          note_title: "Note 2",
-          folder: "Personal",
-          chunk_index: 0,
-          total_chunks: 1,
-          content: "only chunk",
-          modified: "2024-01-02",
-          score: 0.7,
-        },
-      ]),
-      searchChunksFTS: vi.fn().mockResolvedValue([]),
-    };
+  it("returns one result per note with its best chunk", async () => {
+    useStore([row("a", 0, 0.8), row("a", 1, 0.9), row("b", 0, 0.7)]);
 
-    vi.mocked(getChunkStore).mockReturnValue(mockStore as unknown as ReturnType<typeof getChunkStore>);
+    const results = await searchChunks("q", { mode: "semantic" });
 
-    const results = await searchChunks("test query", { mode: "semantic" });
-
-    // Should have 2 unique notes, not 3 chunks
-    expect(results).toHaveLength(2);
-    // note1 should have the higher scoring chunk (index 1, score 0.9)
-    const note1 = results.find((r) => r.note_id === "note1");
-    expect(note1?.matchedChunkIndex).toBe(1);
+    expect(results.map((r) => [r.note_id, r.matchedChunkIndex])).toEqual([
+      ["a", 1],
+      ["b", 0],
+    ]);
   });
 
-  it("applies folder filter", async () => {
-    const mockStore = {
-      searchChunks: vi.fn().mockResolvedValue([
-        {
-          chunk_id: "note1_chunk_0",
-          note_id: "note1",
-          note_title: "Note 1",
-          folder: "Work",
-          chunk_index: 0,
-          total_chunks: 1,
-          content: "work content",
-          modified: "2024-01-01",
-          score: 0.9,
-        },
-        {
-          chunk_id: "note2_chunk_0",
-          note_id: "note2",
-          note_title: "Note 2",
-          folder: "Personal",
-          chunk_index: 0,
-          total_chunks: 1,
-          content: "personal content",
-          modified: "2024-01-02",
-          score: 0.8,
-        },
-      ]),
-      searchChunksFTS: vi.fn().mockResolvedValue([]),
-    };
+  it("filters by folder case-insensitively and applies the limit", async () => {
+    useStore([row("a", 0, 0.9, "Work"), row("b", 0, 0.8, "Personal"), row("c", 0, 0.7, "work")]);
 
-    vi.mocked(getChunkStore).mockReturnValue(mockStore as unknown as ReturnType<typeof getChunkStore>);
+    const results = await searchChunks("q", { mode: "semantic", folder: "WORK", limit: 1 });
 
-    const results = await searchChunks("test query", {
-      mode: "semantic",
-      folder: "Work",
-    });
-
-    expect(results).toHaveLength(1);
-    expect(results[0].folder).toBe("Work");
+    expect(results.map((r) => r.note_id)).toEqual(["a"]);
   });
 
-  it("respects limit option", async () => {
-    const mockStore = {
-      searchChunks: vi.fn().mockResolvedValue([
-        {
-          chunk_id: "note1_chunk_0",
-          note_id: "note1",
-          note_title: "Note 1",
-          folder: "Work",
-          chunk_index: 0,
-          total_chunks: 1,
-          content: "content 1",
-          modified: "2024-01-01",
-          score: 0.9,
-        },
-        {
-          chunk_id: "note2_chunk_0",
-          note_id: "note2",
-          note_title: "Note 2",
-          folder: "Work",
-          chunk_index: 0,
-          total_chunks: 1,
-          content: "content 2",
-          modified: "2024-01-02",
-          score: 0.8,
-        },
-        {
-          chunk_id: "note3_chunk_0",
-          note_id: "note3",
-          note_title: "Note 3",
-          folder: "Work",
-          chunk_index: 0,
-          total_chunks: 1,
-          content: "content 3",
-          modified: "2024-01-03",
-          score: 0.7,
-        },
-      ]),
-      searchChunksFTS: vi.fn().mockResolvedValue([]),
-    };
+  it("ranks chunks found by both searches first in hybrid mode", async () => {
+    useStore([row("a", 0, 1), row("b", 0, 0.5)], [row("b", 0, 1)]);
 
-    vi.mocked(getChunkStore).mockReturnValue(mockStore as unknown as ReturnType<typeof getChunkStore>);
+    const results = await searchChunks("q");
 
-    const results = await searchChunks("test query", {
-      mode: "semantic",
-      limit: 2,
-    });
+    expect(results.map((r) => r.note_id)).toEqual(["b", "a"]);
+  });
 
-    expect(results).toHaveLength(2);
+  it("falls back to vector results when full-text search fails in hybrid mode", async () => {
+    useStore([row("a", 0, 1)], new Error("bad query syntax"));
+
+    const results = await searchChunks("foo (bar");
+
+    expect(results.map((r) => r.note_id)).toEqual(["a"]);
+  });
+
+  it("over-fetches both rankings in hybrid mode", async () => {
+    const store = useStore([row("a", 0, 1)]);
+
+    await searchChunks("q", { limit: 20 });
+    expect(store.searchChunks).toHaveBeenCalledWith(expect.any(Array), 80);
+    expect(store.searchChunksFTS).toHaveBeenCalledWith("q", 80);
+
+    await searchChunks("q", { limit: 20, folder: "Work" });
+    expect(store.searchChunks).toHaveBeenLastCalledWith(expect.any(Array), 120);
+    expect(store.searchChunksFTS).toHaveBeenLastCalledWith("q", 120);
+
+    await searchChunks("q", { limit: 1 });
+    expect(store.searchChunks).toHaveBeenLastCalledWith(expect.any(Array), 80);
+  });
+
+  it("surfaces full-text errors in keyword mode", async () => {
+    useStore([], new Error("bad query syntax"));
+
+    await expect(searchChunks("foo (bar", { mode: "keyword" })).rejects.toThrow("bad query syntax");
   });
 });

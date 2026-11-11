@@ -1,129 +1,75 @@
 /**
  * Embedding provider auto-detection and unified interface.
  *
- * Automatically selects between:
+ * Selects the provider at call time:
  * - OpenRouter (if OPENROUTER_API_KEY is set)
  * - Local HuggingFace (fallback)
  */
 
-import { getOpenRouterEmbedding, getOpenRouterDimensions, getOpenRouterEmbeddingBatch } from "./openrouter.js";
+import {
+  getOpenRouterEmbedding,
+  getOpenRouterDimensions,
+  getOpenRouterEmbeddingBatch,
+  getOpenRouterModelName,
+} from "./openrouter.js";
 import { getLocalEmbedding, getLocalDimensions, getLocalModelName, getLocalEmbeddingBatch } from "./local.js";
-import { createDebugLogger } from "../utils/debug.js";
+import { EMBEDDING_CACHE_MAX_SIZE } from "../config/constants.js";
+import { LRUCache } from "../utils/lru.js";
 
-// Debug logging
-const debug = createDebugLogger("EMBED");
+/** Query embeddings keyed by provider description + role + normalized query */
+const queryCache = new LRUCache<string, number[]>(EMBEDDING_CACHE_MAX_SIZE);
 
-// Provider type
-export type EmbeddingProvider = "openrouter" | "local";
-
-// Detect which provider to use based on environment
-let detectedProvider: EmbeddingProvider | null = null;
-
-/**
- * Detect and cache the embedding provider.
- * Uses OpenRouter if API key is set, otherwise falls back to local.
- */
-export function detectProvider(): EmbeddingProvider {
-  if (detectedProvider) {
-    return detectedProvider;
-  }
-
-  if (process.env.OPENROUTER_API_KEY) {
-    detectedProvider = "openrouter";
-    debug("Using OpenRouter embeddings (OPENROUTER_API_KEY found)");
-  } else {
-    detectedProvider = "local";
-    debug(`Using local embeddings (${getLocalModelName()})`);
-  }
-
-  return detectedProvider;
+function useOpenRouter(): boolean {
+  return Boolean(process.env.OPENROUTER_API_KEY?.trim());
 }
 
 /**
- * Get the current embedding provider.
- */
-export function getProvider(): EmbeddingProvider {
-  return detectedProvider ?? detectProvider();
-}
-
-/**
- * Generate embedding for text using the auto-detected provider.
- *
- * @param text - Text to embed
- * @returns Promise resolving to embedding vector
+ * Embed a document/passage for indexing.
  */
 export async function getEmbedding(text: string): Promise<number[]> {
-  const provider = getProvider();
-
-  if (provider === "openrouter") {
-    return getOpenRouterEmbedding(text);
-  } else {
-    return getLocalEmbedding(text);
-  }
+  return useOpenRouter() ? getOpenRouterEmbedding(text) : getLocalEmbedding(text, "passage");
 }
 
 /**
- * Generate embeddings for multiple texts in batch.
- * Uses native batch API for both OpenRouter and local providers.
- *
- * @param texts - Array of texts to embed
- * @returns Promise resolving to array of embedding vectors
+ * Embed multiple documents/passages for indexing.
  */
 export async function getEmbeddingBatch(texts: string[]): Promise<number[][]> {
-  const provider = getProvider();
+  return useOpenRouter() ? getOpenRouterEmbeddingBatch(texts) : getLocalEmbeddingBatch(texts);
+}
 
-  if (provider === "openrouter") {
-    return getOpenRouterEmbeddingBatch(texts);
-  } else {
-    return getLocalEmbeddingBatch(texts);
+/**
+ * Embed a search query (e5 models get the "query:" prefix). Cached per
+ * provider/model; the query is trimmed and whitespace-collapsed (case kept,
+ * since cased models embed "Apple" and "apple" differently).
+ */
+export async function getQueryEmbedding(text: string): Promise<number[]> {
+  const normalized = text.trim().replace(/\s+/g, " ");
+  const key = `${getProviderDescription()}\u0000query\u0000${normalized}`;
+  const cached = queryCache.get(key);
+  if (cached) {
+    return cached;
   }
+
+  const embedding = useOpenRouter()
+    ? await getOpenRouterEmbedding(normalized)
+    : await getLocalEmbedding(normalized, "query");
+  queryCache.set(key, embedding);
+  return embedding;
 }
 
 /**
  * Get the embedding dimensions for the current provider.
- *
- * @returns Number of dimensions in embedding vectors
  */
 export function getEmbeddingDimensions(): number {
-  const provider = getProvider();
-
-  if (provider === "openrouter") {
-    return getOpenRouterDimensions();
-  } else {
-    return getLocalDimensions();
-  }
+  return useOpenRouter() ? getOpenRouterDimensions() : getLocalDimensions();
 }
 
 /**
- * Get a human-readable description of the current provider.
- *
- * @returns Provider description string
+ * Human-readable provider description including model and dimensions.
+ * Stable for a given configuration, so it can identify the embedding space.
  */
 export function getProviderDescription(): string {
-  const provider = getProvider();
-
-  if (provider === "openrouter") {
-    const model = process.env.EMBEDDING_MODEL || "qwen/qwen3-embedding-8b";
-    const dims = getOpenRouterDimensions();
-    return `OpenRouter (${model}, ${dims} dims)`;
-  } else {
-    const model = getLocalModelName();
-    const dims = getLocalDimensions();
-    return `Local (${model}, ${dims} dims)`;
-  }
+  return useOpenRouter()
+    ? `OpenRouter (${getOpenRouterModelName()}, ${getOpenRouterDimensions()} dims)`
+    : `Local (${getLocalModelName()}, ${getLocalDimensions()} dims)`;
 }
-
-// Re-export individual providers for direct access if needed
-export {
-  getOpenRouterEmbedding,
-  getOpenRouterDimensions,
-  getOpenRouterEmbeddingBatch,
-} from "./openrouter.js";
-
-export {
-  getLocalEmbedding,
-  getLocalEmbeddingBatch,
-  getLocalDimensions,
-  getLocalModelName,
-  isModelLoaded,
-} from "./local.js";

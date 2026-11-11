@@ -1,5 +1,5 @@
 export interface IndexProgressEvent {
-  stage: "fetch" | "prepare" | "embed" | "persist" | "delete" | "rebuild-fts" | "done";
+  stage: "fetch" | "prepare" | "embed" | "persist" | "rebuild-fts" | "done";
   current: number;
   total: number;
   message: string;
