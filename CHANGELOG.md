@@ -7,7 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-**Upgrade note:** run `index-notes` with `mode: "full"` after upgrading. Markdown conversion, tag and link extraction, the e5 query/passage prefixes and secret redaction all changed, so content indexed by 1.9.0 no longer matches what the new version indexes and searches.
+### Breaking changes
+
+- **Apple Silicon Mac required.** `@lancedb/lancedb` 0.41 ships no native binaries for Intel (x64) Macs
+- **Duplicate titles are an error.** `get-note` and every tool that takes a note title return an error with `id:` suggestions instead of using the first match
+- **Ambiguous folder names are an error.** A folder name that exists in several accounts must be given as `Account/Folder`
+- **Read-only mode hides write tools.** With `READONLY_MODE` on, write tools are not registered at all
+- **`search-notes` needs the chunk index.** The fallback to the old notes-table search is gone; without an index it asks you to run `index-notes`
+- **Run `index-notes` with `mode: "full"` after upgrading.** Markdown conversion, tag and link extraction, the e5 query/passage prefixes and secret redaction all changed, so content indexed by 1.9.0 no longer matches what this version indexes and searches
 
 ### Added
 
@@ -22,16 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Write tools (`create-note`, `update-note`, `delete-note`, `move-note`, `edit-table`, `batch-delete`, `batch-move`) are not registered when `READONLY_MODE` is on, so clients do not see them. The write functions still refuse with `Operation disabled in read-only mode`
 - `READONLY_MODE` and `DEBUG` accept `true`/`false`/`1`/`0` (case-insensitive)
-- `get-note` and every tool that takes a note title return an error listing `id:` suggestions when several notes share the title, instead of using the first match
 - Titles containing `/` resolve as titles; `Folder/Title` is tried as a folder-scoped lookup as well
-- A folder name that matches folders in several accounts (for example `Notes` in iCloud and On My Mac) returns an error listing each `Account/Folder` instead of picking one
 - `create-note` no longer duplicates the title when the content starts with it (Apple Notes writes the title as the first line itself). The response says when Apple Notes chose a different title
 - Notes in "Recently Deleted" are no longer listed, indexed or matched by title, and folder lookups never target it (`id:` lookups still reach them)
 - `delete-note` requires `confirm: true` in the input schema (any other value is rejected before the handler runs)
 - `index-notes` syncs both the notes table (tags, links, related notes) and the chunk table (search) by note id in one run; incremental mode compares each note's `modified` date with the stored one
-- `search-notes` uses the chunk index only; with no index it returns an error asking to run `index-notes`
 - `search-notes` with `include_content: true` reads the note by id
 - Local e5 models embed search queries with the `query:` prefix (documents keep `passage:`); query embeddings are cached per provider and model
 - `EMBEDDING_DIMS` is sent to OpenRouter only when set; without it the model's native size is used and expected to be 4096 (the default model's size)
@@ -44,7 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Error messages from domain errors are returned in full; internal errors are reduced to a generic message
 - Setup wizard writes `~/.apple-notes-mcp/.env` with mode 0600 and keeps keys it does not manage; `~/.claude.json` is backed up, written atomically, and left untouched when it cannot be parsed
 - `engines` requires Bun >= 1.1.0 (replaces `node >= 18`)
-- **Breaking:** Apple Silicon Mac required. Upgraded `@lancedb/lancedb` to 0.41, which ships no native binaries for Intel (x64) Macs (the last darwin-x64 build was 0.22.x)
+- Upgraded `@lancedb/lancedb` to 0.41 (see Breaking changes)
 - Keyword search index stores token positions, so quoted phrases match as phrases. No stemming or stop-word removal; accents are folded (`prilis` matches `příliš`). Indexes written by 1.9.0 still open; the keyword index is rebuilt on the next index run
 - Upgraded `@modelcontextprotocol/sdk` to 1.32
 - Faster indexing: only chunks are embedded (a note's vector is the normalized mean of its chunk vectors), chunk vectors stored by the same embedding model are reused for unchanged chunk text in both full and incremental runs, and the local model embeds in pipeline batches of 8. `index-notes` reports embedded and reused chunk counts
